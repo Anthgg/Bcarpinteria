@@ -10,20 +10,27 @@ import ExcelJS from 'exceljs';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma.service';
 import { AuthUser } from '../common/auth';
+import { parseMoneyCents } from '../common/money';
 import { calculateOrderTotals } from '../orders/pricing';
 
 type JsonRecord = Record<string, unknown>;
 const ROLE_VALUES = Object.values(AppRole);
 const ITEM_TYPES = Object.values(ItemType);
 const moneyCents = (value: unknown, label: string): number => {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 21_474_836.47) {
+  const cents = parseMoneyCents(value);
+  if (cents === undefined) {
     throw new BadRequestException(`${label} debe estar dentro del rango monetario permitido.`);
   }
-  const cents = Math.round(parsed * 100);
-  if (!Number.isSafeInteger(cents) || cents > 2_147_483_647) throw new BadRequestException(`${label} excede el rango monetario permitido.`);
   return cents;
 };
+const optionalDate = (value: unknown, label: string): Date | null => {
+  if (value === undefined || value === null || value === '') return null;
+  const date = new Date(String(value));
+  if (!Number.isFinite(date.getTime())) throw new BadRequestException(`${label} no es una fecha válida.`);
+  return date;
+};
+const isJsonRecord = (value: unknown): value is JsonRecord =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
 const positive = (value: unknown, label: string): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) throw new BadRequestException(`${label} debe ser mayor que cero.`);
@@ -337,6 +344,8 @@ export class CoreService {
     const required = ['id', 'material', 'unidad', 'stock', 'precio unitario'];
     const missing = required.filter((column) => !columns.includes(column));
     if (missing.length) throw new BadRequestException(`Faltan columnas obligatorias: ${missing.join(', ')}.`);
+    const duplicated = required.filter((column) => columns.filter((candidate) => candidate === column).length > 1);
+    if (duplicated.length) throw new BadRequestException(`Hay columnas obligatorias duplicadas: ${duplicated.join(', ')}.`);
     const indexes = Object.fromEntries(required.map((key) => [key, columns.indexOf(key) + 1]));
     const rows: Array<{ row: number; legacyId: string; name: string; unit: string; stock: number; unitPriceCents: number; error?: string }> = [];
     const ids = new Set<string>();
@@ -350,7 +359,7 @@ export class CoreService {
       const stockCell = read('stock');
       const priceCell = read('precio unitario');
       const rawStock = Number(stockCell);
-      const rawPrice = Number(priceCell);
+      const unitPriceCents = parseMoneyCents(priceCell);
       if (rawId == null && !rawName) return;
       const legacyId = String(rawId ?? '').trim();
       const name = String(rawName ?? '').trim();
@@ -362,11 +371,11 @@ export class CoreService {
         : names.has(normalizedName) ? 'Material duplicado dentro del archivo.'
         : stockCell == null || String(stockCell).trim() === '' || !Number.isFinite(rawStock) || rawStock < 0 || rawStock > 99999999999.999 ? 'Stock debe ser numérico, no negativo y estar dentro del rango permitido.'
         : Math.abs(rawStock * 1000 - Math.round(rawStock * 1000)) > 1e-7 ? 'Stock admite hasta tres decimales.'
-        : priceCell == null || String(priceCell).trim() === '' || !Number.isFinite(rawPrice) || rawPrice < 0 || rawPrice > 21474836.47 ? 'Precio unitario debe estar dentro del rango monetario permitido.'
+        : unitPriceCents === undefined ? 'Precio unitario debe estar dentro del rango monetario permitido.'
         : !unit || unit.length > 30 ? 'Unidad debe tener entre 1 y 30 caracteres.' : undefined;
       if (legacyId) ids.add(legacyId);
       if (normalizedName) names.add(normalizedName);
-      rows.push({ row: rowNumber, legacyId, name, unit, stock: rawStock, unitPriceCents: Math.round(rawPrice * 100), ...(error ? { error } : {}) });
+      rows.push({ row: rowNumber, legacyId, name, unit, stock: rawStock, unitPriceCents: unitPriceCents ?? 0, ...(error ? { error } : {}) });
     });
     if (!rows.length) throw new BadRequestException('El Excel no contiene filas de inventario.');
     const existing = await this.prisma.inventoryItem.findMany({
@@ -590,6 +599,7 @@ export class CoreService {
   async createOrder(actor: AuthUser, input: JsonRecord) {
     const customerId = String(input.customerId ?? '');
     if (!Array.isArray(input.lines) || !input.lines.length || input.lines.length > 100) throw new BadRequestException('Agrega entre 1 y 100 líneas al pedido.');
+    if (input.lines.some((line) => !isJsonRecord(line))) throw new BadRequestException('Cada línea del pedido debe ser un objeto válido.');
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer || !customer.active) throw new NotFoundException('Selecciona un cliente activo.');
     const taxRateBasisPoints = Number((await this.prisma.appSetting.findUnique({ where: { key: 'tax_rate_basis_points' } }))?.value ?? 1800);
@@ -647,7 +657,7 @@ export class CoreService {
         code, customerId, status: OrderStatus.CONFIRMED,
         subtotalCents, discountCents, taxRateBasisPoints, taxCents, totalCents,
         trackingToken: randomBytes(32).toString('base64url'),
-        estimatedAt: input.estimatedAt ? new Date(String(input.estimatedAt)) : null,
+        estimatedAt: optionalDate(input.estimatedAt, 'La fecha estimada'),
         notes: optionalText(input.notes),
       }, include: { customer: true } });
       const materialQuantities = new Map<string, number>();
@@ -753,8 +763,9 @@ export class CoreService {
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({ where: { id } });
       if (!order) throw new NotFoundException('Pedido no encontrado.');
+      if (order.status === OrderStatus.CANCELLED) throw new ConflictException('No se pueden registrar pagos en un pedido cancelado.');
       if (order.paidCents + amountCents > order.totalCents) throw new ConflictException('El pago supera el saldo pendiente.');
-      await tx.payment.create({ data: { orderId: id, amountCents, method, observation: optionalText(input.observation, 500), paidAt: input.paidAt ? new Date(String(input.paidAt)) : new Date() } });
+      await tx.payment.create({ data: { orderId: id, amountCents, method, observation: optionalText(input.observation, 500), paidAt: optionalDate(input.paidAt, 'La fecha de pago') ?? new Date() } });
       const paidCents = order.paidCents + amountCents;
       const paymentStatus = paidCents === order.totalCents ? PaymentStatus.PAID : PaymentStatus.PARTIAL;
       await tx.order.update({ where: { id }, data: { paidCents, paymentStatus } });

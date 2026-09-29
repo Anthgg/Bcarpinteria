@@ -41,7 +41,7 @@ export function calculateOrderTotals(lines: PriceLineInput[], taxRateBasisPoints
   const discountCents = pricedLines.reduce((sum, line) => sum + line.discountCents, 0);
   const taxableCents = subtotalCents - discountCents;
   if (![subtotalCents, discountCents, taxableCents].every((value) => Number.isSafeInteger(value) && value <= maxDatabaseInteger)) throw new Error('El pedido excede el rango monetario permitido.');
-  const taxCents = Math.round(taxableCents * taxRateBasisPoints / 10000);
+  const taxCents = Math.floor((taxableCents * taxRateBasisPoints + 5000) / 10000);
   const totalCents = taxableCents + taxCents;
   if (!Number.isSafeInteger(taxCents) || taxCents > maxDatabaseInteger || !Number.isSafeInteger(totalCents) || totalCents > maxDatabaseInteger) throw new Error('El pedido excede el rango monetario permitido.');
   return { lines: pricedLines, subtotalCents, discountCents, taxableCents, taxRateBasisPoints, taxCents, totalCents };

@@ -3,14 +3,14 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { corsOriginsFromEnv } from './common/security-config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.use(cookieParser());
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }));
   app.setGlobalPrefix('api');
-  const corsOrigins = new Set((process.env.CORS_ORIGINS ?? 'http://127.0.0.1:8080,http://localhost:8080,http://127.0.0.1:5173,http://localhost:5173')
-    .split(',').map((origin) => origin.trim()).filter(Boolean));
+  const corsOrigins = corsOriginsFromEnv();
   app.enableCors({
     origin: (origin, callback) => callback(null, !origin || corsOrigins.has(origin)),
     credentials: true,

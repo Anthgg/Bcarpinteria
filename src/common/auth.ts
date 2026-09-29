@@ -16,6 +16,9 @@ const configuredSecret = process.env.JWT_SECRET?.trim() || undefined;
 if (process.env.NODE_ENV === 'production' && !configuredSecret) {
   throw new Error('JWT_SECRET es obligatorio en producción.');
 }
+if (process.env.NODE_ENV === 'production' && Buffer.byteLength(configuredSecret ?? '', 'utf8') < 32) {
+  throw new Error('JWT_SECRET debe tener al menos 32 bytes en producción.');
+}
 export const JWT_SECRET = configuredSecret ?? randomBytes(48).toString('base64url');
 
 const base64url = (value: string | Buffer) => Buffer.from(value).toString('base64url');

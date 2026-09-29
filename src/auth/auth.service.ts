@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma.service';
 import { AuthUser, signAccessToken } from '../common/auth';
 
 const REFRESH_DAYS = 30;
+const DUMMY_PASSWORD_HASH = '$2b$12$WFEVMYyYSbwVV0eyZ6s8..gbkWb4b4seJh2JXjVhagXDI53CTF/5i';
 const hashToken = (value: string) =>
   createHash('sha256').update(value).digest('hex');
 
@@ -41,7 +42,8 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({
       where: { email: email.trim().toLowerCase() },
     });
-    if (!user || !user.active || !(await compare(password, user.passwordHash))) {
+    const passwordMatches = await compare(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+    if (!user || !user.active || !passwordMatches) {
       await this.prisma.auditLog.create({
         data: { action: 'LOGIN_FAILED', entity: 'User', metadata: { email: email.trim().toLowerCase() } },
       });
