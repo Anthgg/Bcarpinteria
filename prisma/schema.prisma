@@ -7,10 +7,460 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// Modelo minimo de verificacion para la fase Foundation.
-/// No representa el modelo de negocio.
+enum AppRole {
+  TESTER
+  ADMIN
+  OPERARIO
+}
+
+enum ItemType {
+  MATERIAL
+  CONSUMIBLE
+  HERRAMIENTA
+  ACTIVO
+  PRODUCTO
+}
+
+enum PieceState {
+  AVAILABLE
+  RESERVED
+  PENDING_DISPOSITION
+  CONSUMED
+  DISCARDED
+}
+
+enum PieceKind {
+  BOARD
+  OFFCUT
+}
+
+enum OrderStatus {
+  DRAFT
+  CONFIRMED
+  IN_PRODUCTION
+  READY
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIAL
+  PAID
+}
+
+enum OrderLineType {
+  CATALOG
+  CUSTOM
+  MATERIAL
+}
+
+enum ProductionStage {
+  ORDER_RECEIVED
+  MATERIALS_RESERVED
+  CUTTING
+  ASSEMBLY
+  SANDING
+  FINISHING
+  QUALITY_CONTROL
+  READY
+}
+
+enum ProductionStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+enum NoteVisibility {
+  INTERNAL
+  PUBLIC
+}
+
+enum ReservationStatus {
+  RESERVED
+  CONSUMED
+  RELEASED
+}
+
 model SystemProbe {
   id        String   @id @default(uuid())
   name      String   @unique
   createdAt DateTime @default(now())
+}
+
+model User {
+  id           String                   @id @default(uuid())
+  email        String                   @unique
+  name         String
+  passwordHash String
+  role         AppRole                  @default(OPERARIO)
+  active       Boolean                  @default(true)
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  sessions     Session[]
+  auditLogs    AuditLog[]
+  stageChanges ProductionStageHistory[]
+  notes        ProductionNote[]
+  incidents    Incident[]
+  photos       ProductionPhoto[]
+}
+
+model Session {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  entity    String
+  entityId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model InventoryItem {
+  id                   String              @id @default(uuid())
+  code                 String              @unique
+  legacyId             String?             @unique
+  name                 String
+  description          String?
+  type                 ItemType            @default(MATERIAL)
+  unit                 String              @default("UNIDAD")
+  stock                Decimal             @default(0) @db.Decimal(14, 3)
+  unitPriceCents       Int                 @default(0)
+  sellable             Boolean             @default(false)
+  controlsStock        Boolean             @default(true)
+  productionConsumable Boolean             @default(false)
+  requiresDimensions   Boolean             @default(false)
+  active               Boolean             @default(true)
+  lengthMm             Int?
+  widthMm              Int?
+  thicknessMm          Int?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  pieces               MaterialPiece[]
+  movements            InventoryMovement[]
+  orderLines           OrderLine[]
+  components           JobComponent[]
+  requirements         RequiredPiece[]
+  itemReservations     ItemReservation[]
+
+  @@index([name])
+  @@index([type, active])
+}
+
+model MaterialPiece {
+  id            String              @id @default(uuid())
+  code          String              @unique
+  materialId    String
+  material      InventoryItem       @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  lengthMm      Int
+  widthMm       Int
+  thicknessMm   Int
+  kind          PieceKind           @default(BOARD)
+  state         PieceState          @default(AVAILABLE)
+  originPieceId String?
+  originPiece   MaterialPiece?      @relation("PieceOrigin", fields: [originPieceId], references: [id], onDelete: SetNull)
+  offcuts       MaterialPiece[]     @relation("PieceOrigin")
+  reservations  PieceReservation[]
+  movements     InventoryMovement[]
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([materialId, state])
+}
+
+model InventoryMovement {
+  id        String         @id @default(uuid())
+  itemId    String?
+  item      InventoryItem? @relation(fields: [itemId], references: [id], onDelete: SetNull)
+  pieceId   String?
+  piece     MaterialPiece? @relation(fields: [pieceId], references: [id], onDelete: SetNull)
+  quantity  Decimal?       @db.Decimal(14, 3)
+  action    String
+  note      String?
+  userId    String?
+  createdAt DateTime       @default(now())
+
+  @@index([itemId, createdAt])
+  @@index([pieceId, createdAt])
+}
+
+model Customer {
+  id             String   @id @default(uuid())
+  documentType   String   @default("OTRO")
+  documentNumber String?
+  name           String
+  phone          String?
+  email          String?
+  address        String?
+  notes          String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  orders         Order[]
+
+  @@unique([documentType, documentNumber])
+  @@index([name])
+}
+
+model Product {
+  id             String      @id @default(uuid())
+  code           String?     @unique
+  name           String
+  description    String?
+  defaultProduct Boolean     @default(false)
+  active         Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  orderLines     OrderLine[]
+}
+
+model Order {
+  id                 String             @id @default(uuid())
+  code               String             @unique
+  customerId         String
+  customer           Customer           @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status             OrderStatus        @default(DRAFT)
+  subtotalCents      Int                @default(0)
+  discountCents      Int                @default(0)
+  taxRateBasisPoints Int                @default(1800)
+  taxCents           Int                @default(0)
+  totalCents         Int                @default(0)
+  paidCents          Int                @default(0)
+  paymentStatus      PaymentStatus      @default(PENDING)
+  trackingToken      String             @unique
+  estimatedAt        DateTime?
+  notes              String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  lines              OrderLine[]
+  payments           Payment[]
+  jobs               ProductionJob[]
+  pushSubscriptions  PushSubscription[]
+
+  @@index([status, createdAt])
+  @@index([customerId, createdAt])
+}
+
+model OrderLine {
+  id                String         @id @default(uuid())
+  orderId           String
+  order             Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  type              OrderLineType
+  productId         String?
+  product           Product?       @relation(fields: [productId], references: [id], onDelete: SetNull)
+  itemId            String?
+  item              InventoryItem? @relation(fields: [itemId], references: [id], onDelete: SetNull)
+  name              String
+  description       String?
+  lengthMm          Int?
+  widthMm           Int?
+  heightMm          Int?
+  quantity          Int
+  unitPriceCents    Int
+  discountCents     Int            @default(0)
+  lineSubtotalCents Int
+  createdAt         DateTime       @default(now())
+  job               ProductionJob?
+
+  @@index([orderId])
+}
+
+model Payment {
+  id          String   @id @default(uuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amountCents Int
+  paidAt      DateTime @default(now())
+  method      String
+  observation String?
+  createdAt   DateTime @default(now())
+}
+
+model ProductionJob {
+  id                String                   @id @default(uuid())
+  orderId           String
+  order             Order                    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderLineId       String                   @unique
+  orderLine         OrderLine                @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  stage             ProductionStage          @default(ORDER_RECEIVED)
+  status            ProductionStatus         @default(ACTIVE)
+  progress          Int                      @default(0)
+  estimatedAt       DateTime?
+  pausedAt          DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  components        JobComponent[]
+  requirements      RequiredPiece[]
+  stageHistory      ProductionStageHistory[]
+  notes             ProductionNote[]
+  incidents         Incident[]
+  photos            ProductionPhoto[]
+  cutPlans          CuttingPlan[]
+  pieceReservations PieceReservation[]
+  itemReservations  ItemReservation[]
+
+  @@index([stage, status])
+}
+
+model JobComponent {
+  id         String        @id @default(uuid())
+  jobId      String
+  job        ProductionJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  label      String
+  materialId String
+  material   InventoryItem @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  quantity   Decimal       @db.Decimal(14, 3)
+  unit       String
+  createdAt  DateTime      @default(now())
+}
+
+model RequiredPiece {
+  id          String        @id @default(uuid())
+  jobId       String
+  job         ProductionJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  materialId  String
+  material    InventoryItem @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  label       String
+  lengthMm    Int
+  widthMm     Int
+  thicknessMm Int
+  quantity    Int
+  createdAt   DateTime      @default(now())
+}
+
+model CuttingPlan {
+  id          String        @id @default(uuid())
+  jobId       String
+  job         ProductionJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  strategy    String
+  kerfMm      Int
+  result      Json
+  confirmedAt DateTime?
+  createdBy   String?
+  createdAt   DateTime      @default(now())
+
+  @@index([jobId, createdAt])
+}
+
+model PieceReservation {
+  id         String            @id @default(uuid())
+  jobId      String
+  job        ProductionJob     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  pieceId    String
+  piece      MaterialPiece     @relation(fields: [pieceId], references: [id], onDelete: Restrict)
+  status     ReservationStatus @default(RESERVED)
+  reservedAt DateTime          @default(now())
+  consumedAt DateTime?
+
+  @@unique([jobId, pieceId])
+  @@index([pieceId, status])
+}
+
+model ItemReservation {
+  id        String            @id @default(uuid())
+  jobId     String
+  job       ProductionJob     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  itemId    String
+  item      InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  quantity  Decimal           @db.Decimal(14, 3)
+  status    ReservationStatus @default(RESERVED)
+  createdAt DateTime          @default(now())
+
+  @@index([itemId, status])
+}
+
+model ProductionStageHistory {
+  id        String          @id @default(uuid())
+  jobId     String
+  job       ProductionJob   @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  stage     ProductionStage
+  progress  Int
+  userId    String?
+  user      User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  note      String?
+  createdAt DateTime        @default(now())
+
+  @@index([jobId, createdAt])
+}
+
+model ProductionNote {
+  id         String         @id @default(uuid())
+  jobId      String
+  job        ProductionJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  visibility NoteVisibility
+  content    String
+  userId     String?
+  user       User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt  DateTime       @default(now())
+
+  @@index([jobId, visibility, createdAt])
+}
+
+model Incident {
+  id          String        @id @default(uuid())
+  jobId       String
+  job         ProductionJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  title       String
+  description String
+  isOpen      Boolean       @default(true)
+  userId      String?
+  user        User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt   DateTime      @default(now())
+  resolvedAt  DateTime?
+
+  @@index([isOpen, createdAt])
+}
+
+model ProductionPhoto {
+  id        String        @id @default(uuid())
+  jobId     String
+  job       ProductionJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  url       String
+  caption   String?
+  public    Boolean       @default(false)
+  userId    String?
+  user      User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt DateTime      @default(now())
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  endpoint  String
+  p256dh    String
+  auth      String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([orderId, endpoint])
+}
+
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model NumberSequence {
+  name  String @id
+  value Int    @default(0)
 }
