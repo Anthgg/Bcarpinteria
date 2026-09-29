@@ -111,6 +111,12 @@ function fitBoard(board: CutBoard, available: PartInstance[], kerfMm: number): {
   const placements: CutPlacement[] = [];
   const remaining: PartInstance[] = [];
   let usedArea = 0;
+  const overlapsWithKerf = (xMm: number, yMm: number, lengthMm: number, widthMm: number) =>
+    placements.some((placement) =>
+      xMm < placement.xMm + placement.widthMm + kerfMm
+      && xMm + widthMm + kerfMm > placement.xMm
+      && yMm < placement.yMm + placement.lengthMm + kerfMm
+      && yMm + lengthMm + kerfMm > placement.yMm);
 
   for (const part of available) {
     if (part.materialId !== board.materialId || part.thicknessMm !== board.thicknessMm) {
@@ -130,6 +136,7 @@ function fitBoard(board: CutBoard, available: PartInstance[], kerfMm: number): {
         const x = shelf.cursorXMm === 0 ? 0 : shelf.cursorXMm + kerfMm;
         const yExtent = shelf.yMm + Math.max(shelf.heightMm, orientation.length);
         if (x + orientation.width > board.widthMm || yExtent > board.lengthMm) continue;
+        if (overlapsWithKerf(x, shelf.yMm, orientation.length, orientation.width)) continue;
         const score = (board.widthMm - x - orientation.width) + (board.lengthMm - yExtent) * 0.01;
         if (!chosen || score < chosen.score) chosen = { shelfIndex, ...orientation, score };
       }
@@ -139,6 +146,7 @@ function fitBoard(board: CutBoard, available: PartInstance[], kerfMm: number): {
         if (orientation.width > board.widthMm || orientation.length > board.lengthMm) continue;
         const y = shelves.length === 0 ? 0 : Math.max(...shelves.map((shelf) => shelf.yMm + shelf.heightMm)) + kerfMm;
         if (y + orientation.length > board.lengthMm) continue;
+        if (overlapsWithKerf(0, y, orientation.length, orientation.width)) continue;
         const score = (board.widthMm - orientation.width) + (board.lengthMm - y - orientation.length) * 0.01;
         if (!chosen || score < chosen.score) chosen = { shelfIndex: shelves.length, ...orientation, score };
       }

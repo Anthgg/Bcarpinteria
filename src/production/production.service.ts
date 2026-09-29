@@ -86,8 +86,13 @@ export class ProductionService {
     if (job.status !== ProductionStatus.ACTIVE || job.progress > PROGRESS.ORDER_RECEIVED) {
       throw new ConflictException('La selección se define antes de reservar los materiales.');
     }
-    const components = Array.isArray(input.components) ? input.components as Record<string, unknown>[] : [];
-    const pieces = Array.isArray(input.pieces) ? input.pieces as Record<string, unknown>[] : [];
+    if (!Array.isArray(input.components) || !Array.isArray(input.pieces)) throw new BadRequestException('Componentes y piezas deben enviarse como listas.');
+    if (input.components.some((row) => !row || typeof row !== 'object' || Array.isArray(row))
+      || input.pieces.some((row) => !row || typeof row !== 'object' || Array.isArray(row))) {
+      throw new BadRequestException('Cada componente y pieza debe ser un objeto válido.');
+    }
+    const components = input.components as Record<string, unknown>[];
+    const pieces = input.pieces as Record<string, unknown>[];
     if (components.length > 100 || pieces.length > 100) throw new BadRequestException('El plan excede el máximo de componentes.');
     const componentRows: Array<{ label: string; materialId: string; quantity: Prisma.Decimal; unit: string }> = [];
     for (const row of components) {
@@ -132,7 +137,10 @@ export class ProductionService {
     const strategy = String(input.strategy ?? 'OFFCUTS_FIRST') as CutStrategy;
     if (!['OFFCUTS_FIRST', 'FULL_BOARDS_FIRST'].includes(strategy)) throw new BadRequestException('Estrategia de corte inválida.');
     const configuredKerf = Number((await this.prisma.appSetting.findUnique({ where: { key: 'cutting_kerf_mm' } }))?.value ?? 3);
-    const kerfMm = input.kerfMm === undefined ? configuredKerf : Math.round(Number(input.kerfMm));
+    const kerfMm = input.kerfMm === undefined ? configuredKerf : Number(input.kerfMm);
+    if (!Number.isSafeInteger(kerfMm) || kerfMm < 0 || kerfMm > 10_000) {
+      throw new BadRequestException('El ancho de corte debe ser un número entero entre 0 y 10000 mm.');
+    }
     const materialIds = [...new Set(job.requirements.map((piece) => piece.materialId))];
     const available = await this.prisma.materialPiece.findMany({
       where: { materialId: { in: materialIds }, state: PieceState.AVAILABLE },
@@ -161,7 +169,8 @@ export class ProductionService {
   }
 
   async confirmPlan(actor: AuthUser, jobId: string, planId: string) {
-    return this.prisma.$transaction(async (tx) => {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
       const job = await tx.productionJob.findUnique({ where: { id: jobId }, include: { orderLine: true } });
       if (!job) throw new NotFoundException('Producción no encontrada.');
       if (job.status !== ProductionStatus.ACTIVE || job.stage !== ProductionStage.ORDER_RECEIVED) throw new ConflictException('La producción no está lista para reservar.');
@@ -174,7 +183,22 @@ export class ProductionService {
       if (pieceIds.length) {
         const updated = await tx.materialPiece.updateMany({ where: { id: { in: pieceIds }, state: PieceState.AVAILABLE }, data: { state: PieceState.RESERVED } });
         if (updated.count !== pieceIds.length) throw new ConflictException('Una o más tablas ya no están disponibles. Simula de nuevo.');
-        await tx.pieceReservation.createMany({ data: pieceIds.map((pieceId) => ({ jobId, pieceId })) });
+        const priorReservations = await tx.pieceReservation.findMany({
+          where: { jobId, pieceId: { in: pieceIds } },
+          select: { id: true, pieceId: true, status: true },
+        });
+        if (priorReservations.some((reservation) => reservation.status !== ReservationStatus.RELEASED)) {
+          throw new ConflictException('Una o más tablas ya tienen una reserva registrada para esta producción.');
+        }
+        const priorPieceIds = new Set(priorReservations.map((reservation) => reservation.pieceId));
+        if (priorReservations.length) {
+          await tx.pieceReservation.updateMany({
+            where: { id: { in: priorReservations.map((reservation) => reservation.id) }, status: ReservationStatus.RELEASED },
+            data: { status: ReservationStatus.RESERVED, reservedAt: new Date(), consumedAt: null },
+          });
+        }
+        const newPieceIds = pieceIds.filter((pieceId) => !priorPieceIds.has(pieceId));
+        if (newPieceIds.length) await tx.pieceReservation.createMany({ data: newPieceIds.map((pieceId) => ({ jobId, pieceId })) });
         for (const pieceId of pieceIds) await tx.inventoryMovement.create({ data: { pieceId, action: 'PIECE_RESERVED', note: `Reserva ${job.id}`, userId: actor.id } });
       }
       const components = await tx.jobComponent.findMany({ where: { jobId }, include: { material: { select: { controlsStock: true } } } });
@@ -195,7 +219,13 @@ export class ProductionService {
       await tx.order.update({ where: { id: job.orderId }, data: { status: OrderStatus.IN_PRODUCTION } });
       await tx.auditLog.create({ data: { userId: actor.id, action: 'PRODUCTION_RESERVED', entity: 'ProductionJob', entityId: jobId, metadata: { planId, pieces: pieceIds.length, components: totals.size } } });
       return { ok: true, reservedPieces: pieceIds.length, reservedComponentTypes: totals.size };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && ['P2002', 'P2034'].includes(error.code)) {
+        throw new ConflictException('Una o más tablas ya no están disponibles. Simula de nuevo.');
+      }
+      throw error;
+    }
   }
 
   private async nextPieceCode(tx: Prisma.TransactionClient, kind: 'piece' | 'offcut') {
@@ -254,11 +284,19 @@ export class ProductionService {
       for (const reservation of pieces) {
         await tx.materialPiece.update({ where: { id: reservation.pieceId }, data: { state: PieceState.AVAILABLE } });
         await tx.pieceReservation.update({ where: { id: reservation.id }, data: { status: ReservationStatus.RELEASED } });
+        await tx.inventoryMovement.create({ data: {
+          pieceId: reservation.pieceId, action: 'PIECE_RESERVATION_RELEASED',
+          note: `Reserva liberada en producción ${jobId}`, userId: actor.id,
+        } });
       }
       const items = await tx.itemReservation.findMany({ where: { jobId, status: ReservationStatus.RESERVED } });
       for (const reservation of items) {
         await tx.inventoryItem.update({ where: { id: reservation.itemId }, data: { stock: { increment: reservation.quantity } } });
         await tx.itemReservation.update({ where: { id: reservation.id }, data: { status: ReservationStatus.RELEASED } });
+        await tx.inventoryMovement.create({ data: {
+          itemId: reservation.itemId, quantity: reservation.quantity, action: 'ITEM_RESERVATION_RELEASED',
+          note: `Reserva liberada en producción ${jobId}`, userId: actor.id,
+        } });
       }
       await tx.productionJob.update({ where: { id: jobId }, data: { stage: ProductionStage.ORDER_RECEIVED, progress: 0 } });
       const otherStartedJobs = await tx.productionJob.count({ where: { orderId: job.orderId, id: { not: jobId }, progress: { gt: 0 } } });
@@ -336,7 +374,6 @@ export class ProductionService {
   }
 
   async addPhoto(actor: AuthUser, jobId: string, file: Express.Multer.File, caption?: string, isPublic = false) {
-    const job = await this.requireJob(jobId);
     if (!file) throw new BadRequestException('Selecciona una fotografía.');
     const extensionByMime = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' } as const;
     const expectedExtension = extensionByMime[file.mimetype as keyof typeof extensionByMime];
@@ -346,21 +383,26 @@ export class ProductionService {
       await unlink(filePath).catch(() => undefined);
       throw new BadRequestException('Usa una fotografía JPEG, PNG o WebP válida.');
     }
-    const contents = await readFile(filePath).catch(async () => {
+    let job: Awaited<ReturnType<ProductionService['requireJob']>>;
+    let photo: Awaited<ReturnType<PrismaService['productionPhoto']['create']>>;
+    try {
+      job = await this.requireJob(jobId);
+      const contents = await readFile(filePath);
+      const isJpeg = expectedExtension === 'jpg' && contents.length >= 3 && contents[0] === 0xff && contents[1] === 0xd8 && contents[2] === 0xff;
+      const isPng = expectedExtension === 'png' && contents.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      const isWebp = expectedExtension === 'webp' && contents.length >= 12 && contents.toString('ascii', 0, 4) === 'RIFF' && contents.toString('ascii', 8, 12) === 'WEBP';
+      if (!isJpeg && !isPng && !isWebp) throw new BadRequestException('El contenido del archivo no coincide con una imagen JPEG, PNG o WebP.');
+      const safeCaption = caption ? text(caption, 'Descripción', 180) : null;
+      photo = await this.prisma.productionPhoto.create({ data: {
+        jobId, url: `/api/files/${filename}`, caption: safeCaption,
+        public: isPublic, userId: actor.id,
+      } });
+    } catch (error) {
       await unlink(filePath).catch(() => undefined);
-      throw new BadRequestException('No se pudo leer la fotografía cargada.');
-    });
-    const isJpeg = expectedExtension === 'jpg' && contents.length >= 3 && contents[0] === 0xff && contents[1] === 0xd8 && contents[2] === 0xff;
-    const isPng = expectedExtension === 'png' && contents.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    const isWebp = expectedExtension === 'webp' && contents.length >= 12 && contents.toString('ascii', 0, 4) === 'RIFF' && contents.toString('ascii', 8, 12) === 'WEBP';
-    if (!isJpeg && !isPng && !isWebp) {
-      await unlink(filePath).catch(() => undefined);
-      throw new BadRequestException('El contenido del archivo no coincide con una imagen JPEG, PNG o WebP.');
+      if (error instanceof BadRequestException || error instanceof NotFoundException) throw error;
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') throw new BadRequestException('No se pudo leer la fotografía cargada.');
+      throw error;
     }
-    const photo = await this.prisma.productionPhoto.create({ data: {
-      jobId, url: `/api/files/${filename}`, caption: caption ? text(caption, 'Descripción', 180) : null,
-      public: isPublic, userId: actor.id,
-    } });
     await this.core.audit(actor.id, 'PRODUCTION_PHOTO_ADDED', 'ProductionPhoto', photo.id, { jobId, public: isPublic });
     if (isPublic) await this.notify(job.orderId, { type: 'public-photo', caption: photo.caption });
     return photo;
