@@ -56,10 +56,17 @@ try {
   const health = (await call('GET', '/health')).data;
   assert.equal(health.database.connected, true);
   assert.equal(health.excel.readOnly, true);
-  const admin = await login(adminEmail, adminPassword);
-  assert.equal(admin.user.role, 'ADMIN');
-  assert.equal((await call('GET', '/auth/me', admin.cookie)).data.role, 'ADMIN');
-  report.auth = 'ADMIN, access y refresh';
+  const bootstrapAdmin = await login(adminEmail, adminPassword);
+  assert.equal(bootstrapAdmin.user.role, 'ADMIN');
+  const testerPassword = randomBytes(24).toString('base64url');
+  const testerEmail = `tester.${stamp}@local.test`;
+  await call('POST', '/users', bootstrapAdmin.cookie, {
+    email: testerEmail, name: `Tester V1 ${stamp}`, password: testerPassword, role: 'TESTER',
+  }, 201);
+  const admin = await login(testerEmail, testerPassword);
+  assert.equal(admin.user.role, 'TESTER');
+  assert.equal((await call('GET', '/auth/me', admin.cookie)).data.role, 'TESTER');
+  report.auth = 'ADMIN de aprovisionamiento + Tester en flujo V1, access y refresh';
 
   stage = 'previsualización e importación Excel';
   const preview = (await call('GET', '/inventory/import/preview', admin.cookie)).data;
