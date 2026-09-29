@@ -24,9 +24,11 @@ CMD ["npm", "run", "start:dev"]
 
 FROM base AS production
 ENV NODE_ENV=production
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/prisma ./prisma
-COPY package.json package-lock.json ./
+RUN mkdir -p /app/uploads && chown node:node /app/uploads
+COPY --chown=node:node --from=build /app/node_modules ./node_modules
+COPY --chown=node:node --from=build /app/dist ./dist
+COPY --chown=node:node --from=build /app/prisma ./prisma
+COPY --chown=node:node package.json package-lock.json ./
+USER node
 EXPOSE 3000
 CMD ["npm", "run", "start:prod"]
