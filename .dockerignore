@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+.git
+.env
+.env.local
+*.log
+npm-debug.log*
+bd
+compose.yml
+README.md

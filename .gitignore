@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+
+# Archivo de datos externo/local (no se sube al repositorio)
+bd/
