@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
+    "test:reservation-concurrency": "node scripts/v1-reservation-concurrency.mjs",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
