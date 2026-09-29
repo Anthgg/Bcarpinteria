@@ -74,3 +74,32 @@ npx prisma migrate deploy
 ## Fuera de V1
 
 No se conecta Supabase ni servicios cloud, SUNAT, pasarelas de pago, WhatsApp Business API, CAD o IA. WhatsApp abre un mensaje prellenado que una persona envía manualmente.
+
+## Presentación local V1
+
+**Requisitos:** Windows 10/11 con Docker Desktop iniciado en modo de contenedores Linux y Docker Compose v2. Docker ejecuta la API, la interfaz y PostgreSQL; no hace falta instalar PostgreSQL en Windows. Para desarrollo fuera de Docker, usar Node.js 22 y npm. El libro de inventario debe existir en `Bcarpinteria/bd/inventario g.xlsx`.
+
+Desde `C:\Users\anthg\Carpinteria`, prepara `.env` a partir de `.env.example` si aún no existe y ejecuta:
+
+```powershell
+docker compose up --build
+```
+
+La entrada de la aplicación es <http://127.0.0.1:8080>; la comprobación de API es <http://127.0.0.1:8080/api/health>. Para detener el stack de presentación, desde la misma carpeta ejecuta `docker compose down`. Ese comando conserva los datos: PostgreSQL vive en el volumen Docker `carpinteria_pgdata` y las fotos en `carpinteria_uploads`. No usar `docker compose down -v` para la base de presentación.
+
+`compose.yml` es el modo local de desarrollo: monta el código fuente, ejecuta Vite y NestJS en modo de desarrollo y usa los volúmenes `carpinteria_pgdata`/`carpinteria_uploads`. `compose.prod.yml` compila la interfaz y la API para producción, sirve la interfaz con Nginx, requiere secretos explícitos y usa volúmenes separados `carpinteria_prod_pgdata`/`carpinteria_prod_uploads`; no es necesario para la exposición V1. PostgreSQL solo se publica dentro de la red Docker. El Excel se monta desde `Bcarpinteria/bd` como solo lectura.
+
+Rutas principales: `/` (aplicación y acceso), `/api` (API), `/api/health` (salud) y `/seguimiento/<token>` (seguimiento público). El menú se adapta a `TESTER`, `ADMIN` y `OPERARIO`; la API también valida permisos. Las notificaciones Web Push son opcionales y solo funcionan al configurar `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY` y `VAPID_PRIVATE_KEY`.
+
+### Acceso de demostración
+
+Las cuentas preparadas para esta presentación son `demo-tester@local.test` (`TESTER`), `demo-admin@local.test` (`ADMIN`) y `demo-operario@local.test` (`OPERARIO`). Sus contraseñas están solo en `%USERPROFILE%\.codex\local-secrets\Carpinteria\demo-access.txt`, fuera de ambos repositorios. No las copies a un README, a `.env` ni a otro archivo versionado.
+
+En una base nueva, el seed crea o actualiza las cuentas indicadas por variables de entorno y carga catálogos/configuración inicial. Para crear los tres roles desde PowerShell, define correos y contraseñas temporales para `SEED_TESTER_EMAIL`/`SEED_TESTER_PASSWORD`, `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD`, y `SEED_OPERATOR_EMAIL`/`SEED_OPERATOR_PASSWORD`, todos con contraseñas propias de al menos 12 caracteres; luego, desde `C:\Users\anthg\Carpinteria`, ejecuta:
+
+```powershell
+docker compose exec -e SEED_TESTER_EMAIL -e SEED_TESTER_PASSWORD -e SEED_ADMIN_EMAIL -e SEED_ADMIN_PASSWORD -e SEED_OPERATOR_EMAIL -e SEED_OPERATOR_PASSWORD backend npm run seed
+Remove-Item Env:SEED_TESTER_EMAIL, Env:SEED_TESTER_PASSWORD, Env:SEED_ADMIN_EMAIL, Env:SEED_ADMIN_PASSWORD, Env:SEED_OPERATOR_EMAIL, Env:SEED_OPERATOR_PASSWORD
+```
+
+El seed también actualiza los productos iniciales con códigos `MES-001`, `SIL-001`, `ARM-001`, `REP-001` y carga ajustes faltantes. En la base de presentación poblada, evita volver a ejecutarlo: administra usuarios desde Configuración > Usuarios para no alterar el catálogo que se expondrá. Repetir el seed con el mismo correo cambia su contraseña. Guarda cualquier contraseña solo en un archivo local protegido fuera de los repositorios.

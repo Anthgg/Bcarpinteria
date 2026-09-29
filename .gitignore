@@ -8,3 +8,4 @@ coverage/
 
 # Archivo de datos externo/local (no se sube al repositorio)
 bd/
+.codebase-memory/
