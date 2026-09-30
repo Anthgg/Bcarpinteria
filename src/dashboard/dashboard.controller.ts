@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { AppRole } from '@prisma/client';
 import { Roles } from '../common/auth';
 import { DashboardService } from './dashboard.service';
@@ -7,6 +7,9 @@ import { DashboardService } from './dashboard.service';
 @Roles(AppRole.ADMIN, AppRole.TESTER)
 export class DashboardController {
   constructor(private readonly dashboard: DashboardService) {}
-  @Get() summary() { return this.dashboard.summary(); }
+  @Get() summary(@Query('period') period?: string) {
+    const range = period === '7d' || period === '30d' || period === 'month' ? period : 'month';
+    return this.dashboard.summary(range);
+  }
   @Get('audit') auditLog() { return this.dashboard.auditLog(); }
 }
