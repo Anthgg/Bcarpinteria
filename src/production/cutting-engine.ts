@@ -22,6 +22,9 @@ export interface CutRequirement {
 
 export type CutStrategy = 'OFFCUTS_FIRST' | 'FULL_BOARDS_FIRST';
 
+/** Límite único del ancho de corte (kerf), en mm enteros: lo aplican el motor, la simulación y Configuración. */
+export const MAX_KERF_MM = 100;
+
 export interface CutPlacement {
   requirementId: string;
   label: string;
@@ -389,7 +392,7 @@ export function suggestCuts(
   strategy: CutStrategy,
   stock?: MaterialStockContext[],
 ): CuttingResult {
-  if (!Number.isInteger(kerfMm) || kerfMm < 0 || kerfMm > 100) throw new Error('Kerf inválido.');
+  if (!Number.isInteger(kerfMm) || kerfMm < 0 || kerfMm > MAX_KERF_MM) throw new Error('Kerf inválido.');
   for (const board of boards) {
     if (![board.lengthMm, board.widthMm, board.thicknessMm].every(validDimension)) throw new Error(`Dimensiones inválidas para ${board.code}.`);
   }

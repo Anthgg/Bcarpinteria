@@ -18,7 +18,7 @@ import { basename, resolve } from 'node:path';
 import { PrismaService } from '../prisma.service';
 import { AuthUser } from '../common/auth';
 import { CoreService } from '../core/core.service';
-import { CutBoard, CutRequirement, CutStrategy, CuttingResult, MaterialStockContext, suggestCuts } from './cutting-engine';
+import { CutBoard, CutRequirement, CutStrategy, CuttingResult, MAX_KERF_MM, MaterialStockContext, suggestCuts } from './cutting-engine';
 
 const PROGRESS: Record<ProductionStage, number> = {
   ORDER_RECEIVED: 0,
@@ -138,8 +138,8 @@ export class ProductionService {
     if (!['OFFCUTS_FIRST', 'FULL_BOARDS_FIRST'].includes(strategy)) throw new BadRequestException('Estrategia de corte inválida.');
     const configuredKerf = Number((await this.prisma.appSetting.findUnique({ where: { key: 'cutting_kerf_mm' } }))?.value ?? 3);
     const kerfMm = input.kerfMm === undefined ? configuredKerf : Number(input.kerfMm);
-    if (!Number.isSafeInteger(kerfMm) || kerfMm < 0 || kerfMm > 10_000) {
-      throw new BadRequestException('El ancho de corte debe ser un número entero entre 0 y 10000 mm.');
+    if (!Number.isSafeInteger(kerfMm) || kerfMm < 0 || kerfMm > MAX_KERF_MM) {
+      throw new BadRequestException(`El ancho de corte debe ser un número entero entre 0 y ${MAX_KERF_MM} mm.`);
     }
     const materialIds = [...new Set(job.requirements.map((piece) => piece.materialId))];
     const [available, pieceCounts] = await Promise.all([
