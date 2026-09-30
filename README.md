@@ -30,6 +30,10 @@ Las piezas físicas (`MaterialPiece`) y las piezas requeridas (`RequiredPiece`) 
 
 `POST /api/production/:id/cutting/simulate` solo lee inventario y guarda un `CuttingPlan`. El motor usa únicamente `MaterialPiece` en estado `AVAILABLE` del mismo material y el mismo alto; admite giro de 90° y descuenta el kerf (`cutting_kerf_mm`, 3 mm por defecto) entre piezas. El kerf tiene un único límite, `MAX_KERF_MM` = 0–100 mm enteros, que aplican Configuración, la simulación y el motor.
 
+### Unidades de inventario
+
+La unidad de un artículo proviene de un catálogo controlado (`src/common/units.ts`): `UNIDAD`, `TABLON`, `TABLERO` y `JUEGO`, las unidades realmente presentes en PostgreSQL y en el Excel. `GET /api/inventory/units` lo expone con etiquetas para la interfaz (Unidad, Tablón…). Alta, edición e importación normalizan equivalencias explícitas (por ejemplo, «Unidad», «UND» o «Unid.» → `UNIDAD`; «Tablón» → `TABLON`) y rechazan cualquier otra con 400 «Unidad de inventario no válida.»; en la importación, una unidad desconocida queda como error de fila y nunca se crea. No confundir con la unidad dimensional (mm, cm, m).
+
 `PUT /api/production/:id/materials` recibe la lista completa editada (piezas y consumibles) y la reemplaza en una transacción; solo se admite antes de reservar (etapa `ORDER_RECEIVED`, producción activa). `GET /api/inventory/material-availability` (TESTER, ADMIN y OPERARIO, solo lectura) devuelve en consultas agregadas, por artículo activo: stock suelto, cantidad reservada, piezas físicas por estado, piezas `AVAILABLE`, altos disponibles, pieza mayor y el umbral `low_stock_threshold` que también usa el dashboard. El stock numérico de `InventoryItem` no se usa como tabla. Cada pieza en `unplaced` lleva `reason` y `reasonDetails`, y `diagnostics` resume el embudo de candidatos por material y requerimiento:
 
 | Código | Significado |

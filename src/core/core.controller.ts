@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@
 import { AppRole } from '@prisma/client';
 import { CurrentUser, Roles, AuthUser } from '../common/auth';
 import { CoreService } from './core.service';
+import { INVENTORY_UNITS } from '../common/units';
 
 type BodyObject = Record<string, unknown>;
 
@@ -30,6 +31,10 @@ export class InventoryController {
   @Get('movements')
   @Roles(AppRole.ADMIN, AppRole.TESTER, AppRole.OPERARIO)
   movements() { return this.core.listMovements(); }
+
+  @Get('units')
+  @Roles(AppRole.ADMIN, AppRole.TESTER, AppRole.OPERARIO)
+  units() { return INVENTORY_UNITS; }
 
   @Get('material-availability')
   @Roles(AppRole.ADMIN, AppRole.TESTER, AppRole.OPERARIO)

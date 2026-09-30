@@ -13,6 +13,7 @@ import { AuthUser } from '../common/auth';
 import { parseMoneyCents } from '../common/money';
 import { calculateOrderTotals } from '../orders/pricing';
 import { MAX_KERF_MM } from '../production/cutting-engine';
+import { INVENTORY_UNITS, normalizeInventoryUnit } from '../common/units';
 
 type JsonRecord = Record<string, unknown>;
 const ROLE_VALUES = Object.values(AppRole);
@@ -229,8 +230,8 @@ export class CoreService {
     if (requiresDimensions && dimensions.some((field) => !normalizedDimensions[field])) throw new BadRequestException('Un material dimensional requiere largo, ancho y espesor en mm.');
     const initialStock = Number(input.stock ?? 0);
     if (!Number.isFinite(initialStock) || initialStock < 0 || initialStock > 99999999999.999) throw new BadRequestException('El stock inicial debe estar dentro del rango permitido.');
-    const unit = String(input.unit ?? 'UNIDAD').trim().toUpperCase();
-    if (!unit || unit.length > 30) throw new BadRequestException('Unidad inválida.');
+    const unit = normalizeInventoryUnit(input.unit ?? 'UNIDAD');
+    if (!unit) throw new BadRequestException('Unidad de inventario no válida.');
     const item = await this.prisma.inventoryItem.create({
       data: {
         code: `SKU-${randomBytes(5).toString('hex').toUpperCase()}`,
@@ -268,8 +269,8 @@ export class CoreService {
       data.type = type;
     }
     if (input.unit !== undefined) {
-      const unit = String(input.unit).trim().toUpperCase();
-      if (!unit || unit.length > 30) throw new BadRequestException('Unidad inválida.');
+      const unit = normalizeInventoryUnit(input.unit);
+      if (!unit) throw new BadRequestException('Unidad de inventario no válida.');
       data.unit = unit;
     }
     if (input.unitPrice !== undefined) data.unitPriceCents = moneyCents(input.unitPrice, 'Precio unitario');
@@ -406,7 +407,10 @@ export class CoreService {
       if (rawId == null && !rawName) return;
       const legacyId = String(rawId ?? '').trim();
       const name = String(rawName ?? '').trim();
-      const unit = String(rawUnit ?? '').trim().toUpperCase();
+      // El Excel se mapea al catálogo controlado; una unidad desconocida queda como error de fila, nunca se crea.
+      const rawUnitText = String(rawUnit ?? '').trim();
+      const unit = normalizeInventoryUnit(rawUnitText) ?? rawUnitText.toUpperCase();
+      const unitKnown = normalizeInventoryUnit(rawUnitText) !== null;
       const normalizedName = normalizeHeader(name);
       const error = !legacyId ? 'ID vacío.' : legacyId.length > 100 ? 'El ID excede 100 caracteres.'
         : ids.has(legacyId) ? 'ID duplicado dentro del archivo.'
@@ -415,7 +419,8 @@ export class CoreService {
         : stockCell == null || String(stockCell).trim() === '' || !Number.isFinite(rawStock) || rawStock < 0 || rawStock > 99999999999.999 ? 'Stock debe ser numérico, no negativo y estar dentro del rango permitido.'
         : Math.abs(rawStock * 1000 - Math.round(rawStock * 1000)) > 1e-7 ? 'Stock admite hasta tres decimales.'
         : unitPriceCents === undefined ? 'Precio unitario debe estar dentro del rango monetario permitido.'
-        : !unit || unit.length > 30 ? 'Unidad debe tener entre 1 y 30 caracteres.' : undefined;
+        : !rawUnitText ? 'Unidad vacía.'
+        : !unitKnown ? `Unidad no reconocida: «${rawUnitText.slice(0, 30)}». Usa una del catálogo (${INVENTORY_UNITS.map((entry) => entry.code).join(', ')}).` : undefined;
       if (legacyId) ids.add(legacyId);
       if (normalizedName) names.add(normalizedName);
       rows.push({ row: rowNumber, legacyId, name, unit, stock: rawStock, unitPriceCents: unitPriceCents ?? 0, ...(error ? { error } : {}) });
