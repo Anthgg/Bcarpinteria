@@ -123,6 +123,90 @@ describe('ProductionService material reservation', () => {
   });
 });
 
+describe('ProductionService cutting simulation', () => {
+  const material = { id: 'mat-1', name: 'A013 Madera', unit: 'UNIDAD', stock: '0' };
+  function simulationFixture(requirements: Array<Record<string, unknown>>, pieces: Array<Record<string, unknown>>, counts: Array<{ state: string; count: number }>) {
+    const prisma = {
+      productionJob: { findUnique: jest.fn().mockResolvedValue({
+        id: 'job-1', stage: ProductionStage.ORDER_RECEIVED, status: ProductionStatus.ACTIVE, orderLine: { quantity: 1 },
+        requirements: requirements.map((row) => ({ materialId: material.id, material, ...row })),
+      }) },
+      appSetting: { findUnique: jest.fn().mockResolvedValue({ key: 'cutting_kerf_mm', value: '3' }) },
+      materialPiece: {
+        findMany: jest.fn().mockResolvedValue(pieces.map((row) => ({ materialId: material.id, material: { name: material.name }, ...row }))),
+        groupBy: jest.fn().mockResolvedValue(counts.map(({ state, count }) => ({ materialId: material.id, state, _count: { _all: count } }))),
+      },
+      cuttingPlan: { create: jest.fn().mockResolvedValue({ id: 'plan-1' }) },
+    };
+    const core = { audit: jest.fn().mockResolvedValue(undefined) };
+    return { prisma, core, service: new ProductionService(prisma as never, core as never) };
+  }
+
+  it('reads only AVAILABLE pieces, keeps material and dimensions, and persists a plan without touching stock', async () => {
+    const { prisma, core, service } = simulationFixture(
+      [{ id: 'req-1', label: 'Cubierta', lengthMm: 1800, widthMm: 900, thicknessMm: 18, quantity: 1 }],
+      [{ id: 'piece-1', code: 'TAB-00005', lengthMm: 2400, widthMm: 1200, thicknessMm: 18, kind: 'BOARD' }],
+      [{ state: 'AVAILABLE', count: 1 }],
+    );
+
+    const result = await service.simulate(actor, 'job-1', {});
+
+    expect(prisma.materialPiece.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { materialId: { in: ['mat-1'] }, state: PieceState.AVAILABLE } }));
+    expect(result.boards[0]).toMatchObject({ code: 'TAB-00005', materialId: 'mat-1', lengthMm: 2400, widthMm: 1200, thicknessMm: 18 });
+    expect(result.boards[0].placements[0]).toMatchObject({ label: 'Cubierta', lengthMm: 1800, widthMm: 900 });
+    expect(result.diagnostics).toMatchObject({ requestedParts: 1, placedParts: 1, primaryReason: null });
+    expect(prisma.cuttingPlan.create).toHaveBeenCalledTimes(1);
+    expect(prisma.cuttingPlan.create.mock.calls[0][0].data).toMatchObject({ jobId: 'job-1', strategy: 'OFFCUTS_FIRST', kerfMm: 3 });
+    // El mock no define update/updateMany/reservas: cualquier escritura de inventario lanzaría un error.
+    expect(Object.keys(prisma.materialPiece)).toEqual(['findMany', 'groupBy']);
+    expect(core.audit).toHaveBeenCalledWith(actor.id, 'CUTTING_SIMULATED', 'CuttingPlan', 'plan-1', expect.any(Object));
+  });
+
+  it('returns a backend diagnosis for unplaced pieces using every piece state and loose stock', async () => {
+    const { service } = simulationFixture(
+      [{ id: 'req-1', label: 'dwfe', lengthMm: 233, widthMm: 34, thicknessMm: 23, quantity: 15 }],
+      [{ id: 'piece-8', code: 'RET-00008', lengthMm: 471, widthMm: 1200, thicknessMm: 18, kind: 'OFFCUT' }],
+      [{ state: 'AVAILABLE', count: 1 }, { state: 'CONSUMED', count: 1 }],
+    );
+
+    const result = await service.simulate(actor, 'job-1', { strategy: 'OFFCUTS_FIRST' });
+
+    expect(result.unplaced).toHaveLength(15);
+    expect(result.diagnostics.primaryReason).toBe('THICKNESS_MISMATCH');
+    expect(result.diagnostics.materials[0]).toMatchObject({ materialName: 'A013 Madera', physicalPieces: 2, availablePieces: 1, piecesByState: { AVAILABLE: 1, CONSUMED: 1 } });
+    expect(result.diagnostics.groups).toEqual([expect.objectContaining({ label: 'dwfe', pending: 15, reason: 'THICKNESS_MISMATCH' })]);
+  });
+
+  it('rejects confirming a plan that still has unplaced pieces', async () => {
+    const { tx, service } = fixture();
+    tx.cuttingPlan.findFirst.mockResolvedValue({ id: 'plan-1', jobId: 'job-1', confirmedAt: null, result: { boards: [], unplaced: [{ label: 'Pata' }] } });
+
+    await expect(service.confirmPlan(actor, 'job-1', 'plan-1')).rejects.toThrow('piezas sin ubicar');
+    expect(tx.materialPiece.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('keeps the confirm-cut flow: RESERVED pieces become CONSUMED and leftovers PENDING_DISPOSITION', async () => {
+    const { tx, service } = fixture();
+    tx.productionJob.findUnique.mockResolvedValue({ id: 'job-1', orderId: 'order-1', stage: ProductionStage.MATERIALS_RESERVED, status: ProductionStatus.ACTIVE, progress: 15 });
+    tx.cuttingPlan.findFirst.mockResolvedValue({ id: 'plan-1', result: { unplaced: [], boards: [{
+      id: 'piece-1', code: 'TAB-00006', materialId: 'mat-1',
+      leftovers: [{ xMm: 453, yMm: 0, lengthMm: 600, widthMm: 447, thicknessMm: 18 }],
+    }] } });
+    Object.assign(tx.pieceReservation, { findFirst: jest.fn().mockResolvedValue({ id: 'reservation-1' }) });
+    Object.assign(tx.materialPiece, { create: jest.fn().mockResolvedValue({ id: 'offcut-1' }) });
+    Object.assign(tx, { numberSequence: { upsert: jest.fn().mockResolvedValue({ value: 11 }) } });
+    jest.spyOn(service, 'getJob').mockResolvedValue({} as never);
+
+    const result = await service.confirmCut(actor, 'job-1');
+
+    expect(result.offcutsCreated).toBe(1);
+    expect(tx.materialPiece.update).toHaveBeenCalledWith({ where: { id: 'piece-1' }, data: { state: PieceState.CONSUMED } });
+    expect((tx.materialPiece as unknown as { create: jest.Mock }).create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      code: 'RET-00011', kind: 'OFFCUT', state: PieceState.PENDING_DISPOSITION, originPieceId: 'piece-1', lengthMm: 600, widthMm: 447,
+    }) });
+  });
+});
+
 describe('ProductionService photo uploads', () => {
   let directory: string;
 
