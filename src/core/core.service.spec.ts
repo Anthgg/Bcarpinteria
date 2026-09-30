@@ -106,4 +106,45 @@ describe('CoreService payments and input validation', () => {
     const service = new CoreService({} as PrismaService);
     await expect(service.createOrder({ id: 'user-1' } as never, { customerId: 'customer-1', lines: [null] })).rejects.toThrow(/línea del pedido/i);
   });
+
+  it('rejects a kerf above the single 100 mm limit without saving', async () => {
+    const prisma = { $transaction: jest.fn(), appSetting: { upsert: jest.fn() } };
+    const service = new CoreService(prisma as unknown as PrismaService);
+    await expect(service.updateSettings({ id: 'user-1' } as never, { kerfMm: 101 })).rejects.toThrow('entre 0 y 100 mm');
+    expect(prisma.appSetting.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('CoreService material availability', () => {
+  it('aggregates pieces, thicknesses, largest piece and reservations with a fixed number of queries', async () => {
+    const prisma = {
+      inventoryItem: { findMany: jest.fn().mockResolvedValue([
+        { id: 'wood', code: 'W', name: 'A013', type: 'MATERIAL', unit: 'TABLON', stock: '0', controlsStock: true, productionConsumable: false, requiresDimensions: true },
+        { id: 'screws', code: 'S', name: 'Tornillos', type: 'CONSUMIBLE', unit: 'UNIDAD', stock: '120', controlsStock: true, productionConsumable: true, requiresDimensions: false },
+      ]) },
+      materialPiece: {
+        groupBy: jest.fn().mockResolvedValue([
+          { materialId: 'wood', state: 'AVAILABLE', _count: { _all: 2 } }, { materialId: 'wood', state: 'RESERVED', _count: { _all: 1 } }, { materialId: 'wood', state: 'CONSUMED', _count: { _all: 1 } },
+        ]),
+        findMany: jest.fn().mockResolvedValue([
+          { materialId: 'wood', code: 'RET-1', kind: 'OFFCUT', lengthMm: 60, widthMm: 447, thicknessMm: 18 },
+          { materialId: 'wood', code: 'RET-8', kind: 'OFFCUT', lengthMm: 471, widthMm: 1200, thicknessMm: 18 },
+        ]),
+      },
+      itemReservation: { groupBy: jest.fn().mockResolvedValue([{ itemId: 'screws', _sum: { quantity: '16' } }]) },
+      appSetting: { findUnique: jest.fn().mockResolvedValue({ key: 'low_stock_threshold', value: '5' }) },
+    };
+    const service = new CoreService(prisma as unknown as PrismaService);
+
+    const result = await service.listMaterialAvailability();
+
+    expect(result.lowStockThreshold).toBe(5);
+    expect(result.items[0]).toMatchObject({
+      id: 'wood', physicalPieces: 4, availablePieces: 2, reservedPieces: 1, availableThicknessesMm: [18],
+      largestAvailablePiece: { code: 'RET-8', lengthMm: 471, widthMm: 1200, thicknessMm: 18 },
+    });
+    expect(result.items[1]).toMatchObject({ id: 'screws', stock: 120, reservedQuantity: 16, availablePieces: 0 });
+    expect(prisma.materialPiece.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { materialId: { in: ['wood', 'screws'] }, state: 'AVAILABLE' } }));
+    expect(prisma.materialPiece.findMany).toHaveBeenCalledTimes(1);
+  });
 });

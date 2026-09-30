@@ -123,6 +123,71 @@ describe('ProductionService material reservation', () => {
   });
 });
 
+describe('ProductionService editable material configuration', () => {
+  const wood = { id: 'wood', active: true, type: 'MATERIAL', productionConsumable: false, unit: 'TABLON' };
+  const screws = { id: 'screws', active: true, type: 'CONSUMIBLE', productionConsumable: true, unit: 'UNIDAD' };
+  function configureFixture(job: Record<string, unknown> = {}) {
+    const tx = {
+      jobComponent: { deleteMany: jest.fn().mockResolvedValue({}), createMany: jest.fn().mockResolvedValue({}) },
+      requiredPiece: { deleteMany: jest.fn().mockResolvedValue({}), createMany: jest.fn().mockResolvedValue({}) },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      productionJob: { findUnique: jest.fn().mockResolvedValue({ id: 'job-1', status: ProductionStatus.ACTIVE, stage: ProductionStage.ORDER_RECEIVED, progress: 0, ...job }) },
+      inventoryItem: { findUnique: jest.fn(({ where }: { where: { id: string } }) => Promise.resolve(where.id === 'wood' ? wood : where.id === 'screws' ? screws : null)) },
+      $transaction: jest.fn((work: (transaction: typeof tx) => unknown) => work(tx)),
+    };
+    const service = new ProductionService(prisma as never, {} as never);
+    jest.spyOn(service, 'getJob').mockResolvedValue({ id: 'job-1' } as never);
+    return { tx, prisma, service };
+  }
+  // Lista editada en el frontend: la pata cambió de alto 23 → 18, se duplicó y se eliminó la pieza de 1 mm.
+  const editedPieces = [
+    { label: 'dwfe', materialId: 'wood', lengthMm: 233, widthMm: 34, thicknessMm: 18, quantity: 15 },
+    { label: 'dwfe copia', materialId: 'wood', lengthMm: 233, widthMm: 34, thicknessMm: 18, quantity: 2 },
+  ];
+
+  it('replaces the edited piece and component lists inside one transaction', async () => {
+    const { tx, prisma, service } = configureFixture();
+
+    await service.configure(actor, 'job-1', { components: [{ label: 'Fijación', materialId: 'screws', quantity: 16 }], pieces: editedPieces });
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(tx.requiredPiece.deleteMany).toHaveBeenCalledWith({ where: { jobId: 'job-1' } });
+    expect(tx.jobComponent.deleteMany).toHaveBeenCalledWith({ where: { jobId: 'job-1' } });
+    expect(tx.requiredPiece.createMany).toHaveBeenCalledWith({ data: editedPieces.map((piece) => ({ ...piece, jobId: 'job-1' })) });
+    expect(tx.jobComponent.createMany.mock.calls[0][0].data).toEqual([expect.objectContaining({ label: 'Fijación', materialId: 'screws', unit: 'UNIDAD', jobId: 'job-1' })]);
+    expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ metadata: { components: 1, pieces: 2 } }) }));
+  });
+
+  it('removes every piece when the edited list is empty', async () => {
+    const { tx, service } = configureFixture();
+
+    await service.configure(actor, 'job-1', { components: [], pieces: [] });
+
+    expect(tx.requiredPiece.deleteMany).toHaveBeenCalled();
+    expect(tx.requiredPiece.createMany).not.toHaveBeenCalled();
+  });
+
+  it('validates the whole list before touching saved rows', async () => {
+    const { prisma, service } = configureFixture();
+
+    await expect(service.configure(actor, 'job-1', { components: [], pieces: [editedPieces[0], { ...editedPieces[1], thicknessMm: 0 }] })).rejects.toThrow('milímetros enteros');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['materials were reserved', { stage: ProductionStage.MATERIALS_RESERVED, progress: 15 }],
+    ['production is paused', { status: ProductionStatus.PAUSED }],
+    ['production is already in assembly (PED-00006)', { stage: ProductionStage.ASSEMBLY, progress: 50 }],
+  ])('blocks edits when %s', async (_case, job) => {
+    const { prisma, service } = configureFixture(job);
+
+    await expect(service.configure(actor, 'job-1', { components: [], pieces: editedPieces })).rejects.toThrow('antes de reservar');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
 describe('ProductionService cutting simulation', () => {
   const material = { id: 'mat-1', name: 'A013 Madera', unit: 'UNIDAD', stock: '0' };
   function simulationFixture(requirements: Array<Record<string, unknown>>, pieces: Array<Record<string, unknown>>, counts: Array<{ state: string; count: number }>) {
@@ -175,6 +240,18 @@ describe('ProductionService cutting simulation', () => {
     expect(result.diagnostics.primaryReason).toBe('THICKNESS_MISMATCH');
     expect(result.diagnostics.materials[0]).toMatchObject({ materialName: 'A013 Madera', physicalPieces: 2, availablePieces: 1, piecesByState: { AVAILABLE: 1, CONSUMED: 1 } });
     expect(result.diagnostics.groups).toEqual([expect.objectContaining({ label: 'dwfe', pending: 15, reason: 'THICKNESS_MISMATCH' })]);
+  });
+
+  it('applies the same 0–100 mm kerf limit as the engine and settings', async () => {
+    const pieces = [{ id: 'piece-1', code: 'TAB-1', lengthMm: 2400, widthMm: 1200, thicknessMm: 18, kind: 'BOARD' }];
+    const requirement = [{ id: 'req-1', label: 'Cubierta', lengthMm: 600, widthMm: 450, thicknessMm: 18, quantity: 1 }];
+    const rejected = simulationFixture(requirement, pieces, [{ state: 'AVAILABLE', count: 1 }]);
+    await expect(rejected.service.simulate(actor, 'job-1', { kerfMm: 101 })).rejects.toThrow('entre 0 y 100 mm');
+    expect(rejected.prisma.materialPiece.findMany).not.toHaveBeenCalled();
+    expect(rejected.prisma.cuttingPlan.create).not.toHaveBeenCalled();
+
+    const accepted = simulationFixture(requirement, pieces, [{ state: 'AVAILABLE', count: 1 }]);
+    await expect(accepted.service.simulate(actor, 'job-1', { kerfMm: 100 })).resolves.toMatchObject({ kerfMm: 100 });
   });
 
   it('rejects confirming a plan that still has unplaced pieces', async () => {
