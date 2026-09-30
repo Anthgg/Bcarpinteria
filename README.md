@@ -28,7 +28,9 @@ API local en Node.js, TypeScript, NestJS 11 y Prisma sobre PostgreSQL. El fronte
 
 Las piezas físicas (`MaterialPiece`) y las piezas requeridas (`RequiredPiece`) tienen tres dimensiones en milímetros enteros. La interfaz las llama **Largo × Ancho × Alto**: `lengthMm` = Largo, `widthMm` = Ancho, `thicknessMm` = Alto (en madera, el espesor). No existe una cuarta dimensión.
 
-`POST /api/production/:id/cutting/simulate` solo lee inventario y guarda un `CuttingPlan`. El motor usa únicamente `MaterialPiece` en estado `AVAILABLE` del mismo material y el mismo alto; admite giro de 90° y descuenta el kerf (`cutting_kerf_mm`, 3 mm por defecto) entre piezas. El stock numérico de `InventoryItem` no se usa como tabla. Cada pieza en `unplaced` lleva `reason` y `reasonDetails`, y `diagnostics` resume el embudo de candidatos por material y requerimiento:
+`POST /api/production/:id/cutting/simulate` solo lee inventario y guarda un `CuttingPlan`. El motor usa únicamente `MaterialPiece` en estado `AVAILABLE` del mismo material y el mismo alto; admite giro de 90° y descuenta el kerf (`cutting_kerf_mm`, 3 mm por defecto) entre piezas. El kerf tiene un único límite, `MAX_KERF_MM` = 0–100 mm enteros, que aplican Configuración, la simulación y el motor.
+
+`PUT /api/production/:id/materials` recibe la lista completa editada (piezas y consumibles) y la reemplaza en una transacción; solo se admite antes de reservar (etapa `ORDER_RECEIVED`, producción activa). `GET /api/inventory/material-availability` (TESTER, ADMIN y OPERARIO, solo lectura) devuelve en consultas agregadas, por artículo activo: stock suelto, cantidad reservada, piezas físicas por estado, piezas `AVAILABLE`, altos disponibles, pieza mayor y el umbral `low_stock_threshold` que también usa el dashboard. El stock numérico de `InventoryItem` no se usa como tabla. Cada pieza en `unplaced` lleva `reason` y `reasonDetails`, y `diagnostics` resume el embudo de candidatos por material y requerimiento:
 
 | Código | Significado |
 | --- | --- |

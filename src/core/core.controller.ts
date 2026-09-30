@@ -31,6 +31,10 @@ export class InventoryController {
   @Roles(AppRole.ADMIN, AppRole.TESTER, AppRole.OPERARIO)
   movements() { return this.core.listMovements(); }
 
+  @Get('material-availability')
+  @Roles(AppRole.ADMIN, AppRole.TESTER, AppRole.OPERARIO)
+  materialAvailability() { return this.core.listMaterialAvailability(); }
+
   @Get('import/preview')
   @Roles(AppRole.ADMIN, AppRole.TESTER)
   preview() { return this.core.previewImport(); }

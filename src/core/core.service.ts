@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AppRole, ItemType, OrderLineType, OrderStatus, PaymentStatus, Prisma } from '@prisma/client';
+import { AppRole, ItemType, OrderLineType, OrderStatus, PaymentStatus, PieceState, Prisma, ReservationStatus } from '@prisma/client';
 import { hash } from 'bcryptjs';
 import ExcelJS from 'exceljs';
 import { randomBytes } from 'node:crypto';
@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma.service';
 import { AuthUser } from '../common/auth';
 import { parseMoneyCents } from '../common/money';
 import { calculateOrderTotals } from '../orders/pricing';
+import { MAX_KERF_MM } from '../production/cutting-engine';
 
 type JsonRecord = Record<string, unknown>;
 const ROLE_VALUES = Object.values(AppRole);
@@ -173,6 +174,48 @@ export class CoreService {
       stock: Number(item.stock),
       pieceCounts: Object.fromEntries(pieceCounts.filter((piece) => piece.materialId === item.id).map((piece) => [piece.state, piece._count._all])),
     }));
+  }
+
+  /**
+   * Disponibilidad agregada para los selectores de producción (solo lectura, consultas fijas sin N+1).
+   * Consumibles: `stock` ya es neto de reservas (reservar descuenta stock y crea ItemReservation).
+   * Maderas: solo MaterialPiece AVAILABLE cuenta como utilizable por el plano de corte.
+   */
+  async listMaterialAvailability() {
+    const items = await this.prisma.inventoryItem.findMany({
+      where: { active: true, OR: [{ type: ItemType.MATERIAL }, { productionConsumable: true }] },
+      select: { id: true, code: true, name: true, type: true, unit: true, stock: true, controlsStock: true, productionConsumable: true, requiresDimensions: true },
+      orderBy: { name: 'asc' },
+    });
+    const ids = items.map((item) => item.id);
+    const [counts, available, reservations, threshold] = ids.length ? await Promise.all([
+      this.prisma.materialPiece.groupBy({ by: ['materialId', 'state'], where: { materialId: { in: ids } }, _count: { _all: true } }),
+      this.prisma.materialPiece.findMany({
+        where: { materialId: { in: ids }, state: PieceState.AVAILABLE },
+        select: { materialId: true, code: true, kind: true, lengthMm: true, widthMm: true, thicknessMm: true },
+      }),
+      this.prisma.itemReservation.groupBy({ by: ['itemId'], where: { itemId: { in: ids }, status: ReservationStatus.RESERVED }, _sum: { quantity: true } }),
+      this.prisma.appSetting.findUnique({ where: { key: 'low_stock_threshold' } }),
+    ]) : [[], [], [], null] as const;
+    return {
+      lowStockThreshold: Number(threshold?.value ?? 5),
+      items: items.map((item) => {
+        const pieces = available.filter((piece) => piece.materialId === item.id);
+        const piecesByState = Object.fromEntries(counts.filter((row) => row.materialId === item.id).map((row) => [row.state, row._count._all]));
+        const largest = [...pieces].sort((a, b) => b.lengthMm * b.widthMm - a.lengthMm * a.widthMm)[0];
+        return {
+          ...item,
+          stock: Number(item.stock),
+          reservedQuantity: Number(reservations.find((row) => row.itemId === item.id)?._sum.quantity ?? 0),
+          piecesByState,
+          physicalPieces: Object.values(piecesByState).reduce((sum, count) => sum + count, 0),
+          availablePieces: pieces.length,
+          reservedPieces: piecesByState[PieceState.RESERVED] ?? 0,
+          availableThicknessesMm: [...new Set(pieces.map((piece) => piece.thicknessMm))].sort((a, b) => a - b),
+          largestAvailablePiece: largest ? { code: largest.code, kind: largest.kind, lengthMm: largest.lengthMm, widthMm: largest.widthMm, thicknessMm: largest.thicknessMm } : null,
+        };
+      }),
+    };
   }
 
   async createInventoryItem(actor: AuthUser, input: JsonRecord) {
@@ -557,7 +600,7 @@ export class CoreService {
     }
     if (input.kerfMm !== undefined) {
       const kerf = Math.round(Number(input.kerfMm));
-      if (!Number.isFinite(kerf) || kerf < 0 || kerf > 100) throw new BadRequestException('El ancho de corte debe estar entre 0 y 100 mm.');
+      if (!Number.isFinite(kerf) || kerf < 0 || kerf > MAX_KERF_MM) throw new BadRequestException(`El ancho de corte debe estar entre 0 y ${MAX_KERF_MM} mm.`);
       updates.push(['cutting_kerf_mm', String(kerf)]);
     }
     if (input.companyName !== undefined) updates.push(['company_name', String(input.companyName).trim().slice(0, 160)]);
