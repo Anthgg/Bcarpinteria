@@ -53,7 +53,7 @@ export class PublicService {
       updatedAt: new Date(Math.max(order.updatedAt.getTime(), latestJobTime || order.updatedAt.getTime())),
       estimatedAt: order.estimatedAt,
       progress,
-      currentStage: jobs.length ? jobs.sort((a, b) => b.job.progress - a.job.progress)[0].job.stage : order.status,
+      currentStage: jobs.length ? jobs.reduce((leastAdvanced, entry) => entry.job.progress < leastAdvanced.job.progress ? entry : leastAdvanced).job.stage : order.status,
       timeline,
       notes,
       photos,

@@ -45,4 +45,21 @@ describe('PublicService tracking', () => {
     await expect(service.track('sequential-id')).rejects.toBeInstanceOf(NotFoundException);
     expect(findUnique).not.toHaveBeenCalled();
   });
+
+  it('reports the least advanced product stage for a multi-product order', async () => {
+    findUnique.mockResolvedValueOnce({
+      ...order,
+      lines: [
+        { ...order.lines[0], job: { ...order.lines[0].job, stage: 'READY', progress: 100 } },
+        {
+          name: 'Banco', quantity: 1, type: 'CATALOG',
+          job: { stage: 'ORDER_RECEIVED', progress: 0, updatedAt: eventAt, stageHistory: [], notes: [], photos: [] },
+        },
+      ],
+    });
+
+    const tracking = await service.track(token);
+
+    expect(tracking).toMatchObject({ progress: 50, currentStage: 'ORDER_RECEIVED' });
+  });
 });
