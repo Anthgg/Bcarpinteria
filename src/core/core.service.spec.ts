@@ -65,6 +65,56 @@ describe('CoreService inventory workbook import', () => {
     await expect(service.previewImport()).rejects.toThrow(/columnas obligatorias duplicadas/i);
     expect(findMany).not.toHaveBeenCalled();
   });
+
+  it('maps Excel units to the controlled catalog and reports unknown ones without inventing them', async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Inventario');
+    sheet.addRow(['ID', 'MATERIAL', 'UNIDAD', 'STOCK', 'PRECIO UNITARIO']);
+    sheet.addRow(['U-1', 'Tornillo 2 pulgadas', 'Unidad', 10, 0.5]);
+    sheet.addRow(['U-2', 'Tablón de pino', 'Tablón', 3, 45]);
+    sheet.addRow(['U-3', 'Barniz mate', 'L', 2, 18]);
+    const workbookPath = join(directory, 'units.xlsx');
+    await workbook.xlsx.writeFile(workbookPath);
+    process.env.BD_PATH = workbookPath;
+
+    const report = await service.previewImport();
+
+    expect(report.rows.map((row) => [row.unit, row.error ?? null])).toEqual([
+      ['UNIDAD', null], ['TABLON', null], ['L', expect.stringMatching(/Unidad no reconocida: «L»/)],
+    ]);
+    expect(report).toMatchObject({ validRows: 2, invalidRows: 1 });
+  });
+});
+
+describe('CoreService inventory unit validation', () => {
+  const actor = { id: 'user-1' } as never;
+  const itemInput = { name: 'Madera tornillo', type: 'MATERIAL', stock: 20, unitPrice: 45 };
+
+  it('saves a catalog unit and normalizes an accepted spelling', async () => {
+    const create = jest.fn(({ data }) => Promise.resolve({ id: 'item-1', ...data }));
+    const service = new CoreService({ inventoryItem: { create }, auditLog: { create: jest.fn() } } as unknown as PrismaService);
+    jest.spyOn(service, 'audit').mockResolvedValue(undefined as never);
+
+    await service.createInventoryItem(actor, { ...itemInput, unit: 'Tablón' });
+
+    expect(create.mock.calls[0][0].data.unit).toBe('TABLON');
+  });
+
+  it('rejects an arbitrary unit on create with a 400', async () => {
+    const create = jest.fn();
+    const service = new CoreService({ inventoryItem: { create } } as unknown as PrismaService);
+
+    await expect(service.createInventoryItem(actor, { ...itemInput, unit: 'UNIDADD' })).rejects.toMatchObject({ status: 400, message: 'Unidad de inventario no válida.' });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an arbitrary unit on edit with a 400', async () => {
+    const update = jest.fn();
+    const service = new CoreService({ inventoryItem: { findUnique: jest.fn().mockResolvedValue({ id: 'item-1' }), update } } as unknown as PrismaService);
+
+    await expect(service.updateInventoryItem(actor, 'item-1', { unit: 'maderita' })).rejects.toMatchObject({ status: 400, message: 'Unidad de inventario no válida.' });
+    expect(update).not.toHaveBeenCalled();
+  });
 });
 
 describe('CoreService payments and input validation', () => {
