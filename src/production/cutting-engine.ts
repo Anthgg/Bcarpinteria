@@ -48,11 +48,92 @@ export interface PlannedBoard extends CutBoard {
   wasteAreaMm2: number;
 }
 
+/**
+ * Motivo por el que una pieza no se ubicó. Se evalúa en este orden (embudo):
+ * existencia física → disponibilidad → alto/espesor → largo/ancho (con giro) → espacio tras anidar.
+ */
+export type UnplacedReason =
+  | 'NO_PHYSICAL_STOCK'            // el material no tiene ninguna pieza física registrada
+  | 'STOCK_RESERVED'               // hay piezas, pero ninguna AVAILABLE y al menos una RESERVED
+  | 'NO_AVAILABLE_STOCK'           // hay piezas, pero todas consumidas / por decidir / descartadas
+  | 'THICKNESS_MISMATCH'           // hay piezas disponibles, pero ninguna con el mismo alto (espesor)
+  | 'DIMENSIONS_TOO_LARGE'         // mismo alto, pero la pieza no cabe (ni girada) en ninguna tabla vacía
+  | 'KERF_NO_FIT'                  // cabría en el espacio restante si el corte de sierra fuese 0 mm
+  | 'INSUFFICIENT_REMAINING_SPACE' // cabe en una tabla vacía, pero el espacio se agotó con otras piezas
+  | 'UNKNOWN';
+
+/** Contexto de inventario del material (todas las piezas, no solo las disponibles). */
+export interface MaterialStockContext {
+  materialId: string;
+  materialName: string;
+  unit: string;
+  looseStock: number;
+  piecesByState: Partial<Record<string, number>>;
+}
+
+export interface UnplacedPart {
+  id: string;
+  requirementId: string;
+  label: string;
+  materialId: string;
+  lengthMm: number;
+  widthMm: number;
+  thicknessMm: number;
+  reason: UnplacedReason;
+  reasonDetails: string;
+}
+
+export interface CandidateFunnel {
+  physicalPieces: number;
+  available: number;
+  reserved: number;
+  sameThickness: number;
+  dimensionCompatible: number;
+}
+
+export interface UnplacedGroup {
+  requirementId: string;
+  label: string;
+  materialId: string;
+  materialName: string;
+  lengthMm: number;
+  widthMm: number;
+  thicknessMm: number;
+  requested: number;
+  placed: number;
+  pending: number;
+  reason: UnplacedReason;
+  reasonDetails: string;
+  funnel: CandidateFunnel;
+}
+
+export interface MaterialDiagnostic {
+  materialId: string;
+  materialName: string;
+  unit: string;
+  looseStock: number;
+  physicalPieces: number;
+  availablePieces: number;
+  reservedPieces: number;
+  piecesByState: Partial<Record<string, number>>;
+  availableThicknessesMm: number[];
+}
+
+export interface CuttingDiagnostics {
+  requestedParts: number;
+  placedParts: number;
+  unplacedParts: number;
+  primaryReason: UnplacedReason | null;
+  materials: MaterialDiagnostic[];
+  groups: UnplacedGroup[];
+}
+
 export interface CuttingResult {
   strategy: CutStrategy;
   kerfMm: number;
   boards: PlannedBoard[];
-  unplaced: Array<{ label: string; materialId: string; lengthMm: number; widthMm: number; thicknessMm: number }>;
+  unplaced: UnplacedPart[];
+  diagnostics: CuttingDiagnostics;
   summary: {
     requestedParts: number;
     placedParts: number;
@@ -67,6 +148,7 @@ export interface CuttingResult {
 
 interface PartInstance {
   id: string;
+  requirementId: string;
   label: string;
   materialId: string;
   lengthMm: number;
@@ -93,6 +175,7 @@ function expandedParts(requirements: CutRequirement[]): PartInstance[] {
     for (let i = 0; i < requirement.quantity; i += 1) {
       parts.push({
         id: `${requirement.id}:${i + 1}`,
+        requirementId: requirement.id,
         label: requirement.label,
         materialId: requirement.materialId,
         lengthMm: requirement.lengthMm,
@@ -207,17 +290,8 @@ function fitBoard(board: CutBoard, available: PartInstance[], kerfMm: number): {
   };
 }
 
-export function suggestCuts(
-  requirements: CutRequirement[],
-  boards: CutBoard[],
-  kerfMm: number,
-  strategy: CutStrategy,
-): CuttingResult {
-  if (!Number.isInteger(kerfMm) || kerfMm < 0 || kerfMm > 100) throw new Error('Kerf inválido.');
-  for (const board of boards) {
-    if (![board.lengthMm, board.widthMm, board.thicknessMm].every(validDimension)) throw new Error(`Dimensiones inválidas para ${board.code}.`);
-  }
-  let pending = expandedParts(requirements);
+function nest(parts: PartInstance[], boards: CutBoard[], kerfMm: number, strategy: CutStrategy) {
+  let pending = parts;
   const orderedBoards = [...boards].sort((a, b) => {
     const offcutFirst = strategy === 'OFFCUTS_FIRST';
     const kindOrder = (piece: CutBoard) => piece.kind === 'OFFCUT' ? (offcutFirst ? 0 : 1) : (offcutFirst ? 1 : 0);
@@ -231,6 +305,153 @@ export function suggestCuts(
     if (result.placements.length) planned.push(result);
     pending = remaining;
   }
+  return { planned, pending };
+}
+
+/** Misma regla de orientación que fitBoard: largo contra largo y ancho contra ancho, o girada si se permite. */
+const fitsEmptyBoard = (part: Pick<PartInstance, 'lengthMm' | 'widthMm' | 'canRotate'>, board: CutBoard) =>
+  (part.lengthMm <= board.lengthMm && part.widthMm <= board.widthMm)
+  || (part.canRotate && part.widthMm <= board.lengthMm && part.lengthMm <= board.widthMm);
+
+const STATE_LABELS: Record<string, [string, string]> = {
+  AVAILABLE: ['disponible', 'disponibles'], RESERVED: ['reservada', 'reservadas'], PENDING_DISPOSITION: ['por decidir', 'por decidir'],
+  CONSUMED: ['consumida', 'consumidas'], DISCARDED: ['descartada', 'descartadas'],
+};
+const plural = (count: number, singular: string, pluralForm: string) => `${count} ${count === 1 ? singular : pluralForm}`;
+const stateBreakdown = (byState: Partial<Record<string, number>>) =>
+  Object.entries(byState).filter(([, count]) => count)
+    .map(([state, count]) => plural(count!, ...(STATE_LABELS[state] ?? [state.toLowerCase(), state.toLowerCase()]))).join(', ');
+
+function materialDiagnostics(
+  requirements: CutRequirement[],
+  boards: CutBoard[],
+  stock: MaterialStockContext[] | undefined,
+): Map<string, MaterialDiagnostic> {
+  const result = new Map<string, MaterialDiagnostic>();
+  for (const materialId of new Set(requirements.map((requirement) => requirement.materialId))) {
+    const context = stock?.find((entry) => entry.materialId === materialId);
+    const availableBoards = boards.filter((board) => board.materialId === materialId);
+    const piecesByState = context?.piecesByState ?? (availableBoards.length ? { AVAILABLE: availableBoards.length } : {});
+    result.set(materialId, {
+      materialId,
+      materialName: context?.materialName ?? availableBoards[0]?.materialName ?? 'Material',
+      unit: context?.unit ?? 'UNIDAD',
+      looseStock: context?.looseStock ?? 0,
+      physicalPieces: Object.values(piecesByState).reduce<number>((sum, count) => sum + (count ?? 0), 0),
+      availablePieces: availableBoards.length,
+      reservedPieces: piecesByState.RESERVED ?? 0,
+      piecesByState,
+      availableThicknessesMm: [...new Set(availableBoards.map((board) => board.thicknessMm))].sort((a, b) => a - b),
+    });
+  }
+  return result;
+}
+
+/** Motivo previo al anidado; null significa que la pieza cabe sola en al menos una tabla disponible. */
+function precheck(part: PartInstance, material: MaterialDiagnostic, boards: CutBoard[]): { funnel: CandidateFunnel; reason: UnplacedReason | null; details: string } {
+  const available = boards.filter((board) => board.materialId === part.materialId);
+  const sameThickness = available.filter((board) => board.thicknessMm === part.thicknessMm);
+  const compatible = sameThickness.filter((board) => fitsEmptyBoard(part, board));
+  const funnel: CandidateFunnel = {
+    physicalPieces: material.physicalPieces,
+    available: available.length,
+    reserved: material.reservedPieces,
+    sameThickness: sameThickness.length,
+    dimensionCompatible: compatible.length,
+  };
+  const name = material.materialName;
+  if (!material.physicalPieces) {
+    const details = material.looseStock > 0
+      ? `Hay ${material.looseStock} ${material.unit === 'UNIDAD' ? (material.looseStock === 1 ? 'unidad' : 'unidades') : material.unit.toLowerCase()} de ${name} en stock, pero ninguna está registrada como tabla física con medidas; el plano de corte solo usa piezas físicas.`
+      : `${name} no tiene tablas ni retazos físicos registrados.`;
+    return { funnel, reason: 'NO_PHYSICAL_STOCK', details };
+  }
+  if (!available.length) {
+    const breakdown = stateBreakdown(material.piecesByState);
+    return material.reservedPieces
+      ? { funnel, reason: 'STOCK_RESERVED', details: `${name} tiene ${plural(material.physicalPieces, 'pieza física', 'piezas físicas')}, pero ninguna está disponible (${breakdown}).` }
+      : { funnel, reason: 'NO_AVAILABLE_STOCK', details: `${name} tiene ${plural(material.physicalPieces, 'pieza física', 'piezas físicas')}, pero ninguna está disponible (${breakdown}).` };
+  }
+  if (!sameThickness.length) {
+    return { funnel, reason: 'THICKNESS_MISMATCH', details: `La pieza requiere ${part.thicknessMm} mm de alto; ${available.length === 1 ? 'la pieza disponible' : `las ${available.length} piezas disponibles`} de ${name} ${available.length === 1 ? 'tiene' : 'tienen'} ${material.availableThicknessesMm.join(' / ')} mm.` };
+  }
+  if (!compatible.length) {
+    const largest = [...sameThickness].sort((a, b) => area(b.lengthMm, b.widthMm) - area(a.lengthMm, a.widthMm))[0];
+    return { funnel, reason: 'DIMENSIONS_TOO_LARGE', details: `La pieza mide ${part.lengthMm} × ${part.widthMm} mm y no cabe${part.canRotate ? ' ni girada' : ''} en ninguna pieza disponible de ${part.thicknessMm} mm; la mayor es ${largest.code} (${largest.lengthMm} × ${largest.widthMm} mm).` };
+  }
+  return { funnel, reason: null, details: '' };
+}
+
+export function suggestCuts(
+  requirements: CutRequirement[],
+  boards: CutBoard[],
+  kerfMm: number,
+  strategy: CutStrategy,
+  stock?: MaterialStockContext[],
+): CuttingResult {
+  if (!Number.isInteger(kerfMm) || kerfMm < 0 || kerfMm > 100) throw new Error('Kerf inválido.');
+  for (const board of boards) {
+    if (![board.lengthMm, board.widthMm, board.thicknessMm].every(validDimension)) throw new Error(`Dimensiones inválidas para ${board.code}.`);
+  }
+  const parts = expandedParts(requirements);
+  const { planned, pending } = nest(parts, boards, kerfMm, strategy);
+  const materials = materialDiagnostics(requirements, boards, stock);
+
+  // Distingue "no entra por el corte de sierra" de "no queda espacio": se repite el anidado con kerf 0
+  // y, por requerimiento, las piezas que ahí sí se ubican se atribuyen al kerf.
+  const placedBy = (plan: PlannedBoard[]) => {
+    const counts = new Map<string, number>();
+    for (const board of plan) for (const placement of board.placements) {
+      const requirementId = placement.requirementId.slice(0, placement.requirementId.lastIndexOf(':'));
+      counts.set(requirementId, (counts.get(requirementId) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const placed = placedBy(planned);
+  const placedWithoutKerf = kerfMm > 0 && pending.length ? placedBy(nest(parts, boards, 0, strategy).planned) : placed;
+  const kerfBudget = new Map([...placedWithoutKerf].map(([id, count]) => [id, Math.max(0, count - (placed.get(id) ?? 0))]));
+
+  const funnels = new Map<string, CandidateFunnel>();
+  const unplaced: UnplacedPart[] = pending.map((part) => {
+    const material = materials.get(part.materialId)!;
+    const check = precheck(part, material, boards);
+    funnels.set(part.requirementId, check.funnel);
+    let reason: UnplacedReason = check.reason ?? 'UNKNOWN';
+    let reasonDetails = check.details;
+    if (!check.reason) {
+      const budget = kerfBudget.get(part.requirementId) ?? 0;
+      if (budget > 0) {
+        kerfBudget.set(part.requirementId, budget - 1);
+        reason = 'KERF_NO_FIT';
+        reasonDetails = `La pieza cabría si el corte de sierra fuese 0 mm, pero con ${kerfMm} mm de corte ya no entra en el espacio restante de las piezas de ${material.materialName}.`;
+      } else {
+        reason = 'INSUFFICIENT_REMAINING_SPACE';
+        reasonDetails = `La pieza cabe en una tabla vacía, pero las piezas disponibles de ${part.thicknessMm} mm de ${material.materialName} se ocuparon con otras piezas; faltan tablas o retazos.`;
+      }
+    }
+    return {
+      id: part.id, requirementId: part.requirementId, label: part.label, materialId: part.materialId,
+      lengthMm: part.lengthMm, widthMm: part.widthMm, thicknessMm: part.thicknessMm, reason, reasonDetails,
+    };
+  });
+
+  const groups: UnplacedGroup[] = [];
+  for (const part of unplaced) {
+    const existing = groups.find((group) => group.requirementId === part.requirementId && group.reason === part.reason);
+    if (existing) { existing.pending += 1; continue; }
+    const requirement = requirements.find((entry) => entry.id === part.requirementId)!;
+    groups.push({
+      requirementId: part.requirementId, label: part.label, materialId: part.materialId,
+      materialName: materials.get(part.materialId)!.materialName,
+      lengthMm: part.lengthMm, widthMm: part.widthMm, thicknessMm: part.thicknessMm,
+      requested: requirement.quantity, placed: placed.get(part.requirementId) ?? 0, pending: 1,
+      reason: part.reason, reasonDetails: part.reasonDetails, funnel: funnels.get(part.requirementId)!,
+    });
+  }
+  const reasonTotals = new Map<UnplacedReason, number>();
+  for (const part of unplaced) reasonTotals.set(part.reason, (reasonTotals.get(part.reason) ?? 0) + 1);
+  const primaryReason = [...reasonTotals].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+
   const placedCount = planned.reduce((sum, board) => sum + board.placements.length, 0);
   const totalArea = planned.reduce((sum, board) => sum + area(board.lengthMm, board.widthMm), 0);
   const usedArea = planned.reduce((sum, board) => sum + board.placements.reduce((pieceArea, piece) => pieceArea + area(piece.lengthMm, piece.widthMm), 0), 0);
@@ -238,9 +459,17 @@ export function suggestCuts(
     strategy,
     kerfMm,
     boards: planned,
-    unplaced: pending.map(({ label, materialId, lengthMm, widthMm, thicknessMm }) => ({ label, materialId, lengthMm, widthMm, thicknessMm })),
+    unplaced,
+    diagnostics: {
+      requestedParts: parts.length,
+      placedParts: placedCount,
+      unplacedParts: unplaced.length,
+      primaryReason,
+      materials: [...materials.values()],
+      groups,
+    },
     summary: {
-      requestedParts: expandedParts(requirements).length,
+      requestedParts: parts.length,
       placedParts: placedCount,
       boardsUsed: planned.length,
       cutsEstimated: planned.reduce((sum, board) => sum + board.cutsEstimated, 0),

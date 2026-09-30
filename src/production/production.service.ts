@@ -18,7 +18,7 @@ import { basename, resolve } from 'node:path';
 import { PrismaService } from '../prisma.service';
 import { AuthUser } from '../common/auth';
 import { CoreService } from '../core/core.service';
-import { CutBoard, CutRequirement, CutStrategy, CuttingResult, suggestCuts } from './cutting-engine';
+import { CutBoard, CutRequirement, CutStrategy, CuttingResult, MaterialStockContext, suggestCuts } from './cutting-engine';
 
 const PROGRESS: Record<ProductionStage, number> = {
   ORDER_RECEIVED: 0,
@@ -142,9 +142,22 @@ export class ProductionService {
       throw new BadRequestException('El ancho de corte debe ser un número entero entre 0 y 10000 mm.');
     }
     const materialIds = [...new Set(job.requirements.map((piece) => piece.materialId))];
-    const available = await this.prisma.materialPiece.findMany({
-      where: { materialId: { in: materialIds }, state: PieceState.AVAILABLE },
-      include: { material: { select: { name: true } } },
+    const [available, pieceCounts] = await Promise.all([
+      this.prisma.materialPiece.findMany({
+        where: { materialId: { in: materialIds }, state: PieceState.AVAILABLE },
+        include: { material: { select: { name: true } } },
+      }),
+      this.prisma.materialPiece.groupBy({
+        by: ['materialId', 'state'], where: { materialId: { in: materialIds } }, _count: { _all: true },
+      }),
+    ]);
+    // Contexto de solo lectura para explicar piezas sin ubicar (stock suelto vs. piezas físicas por estado).
+    const stock: MaterialStockContext[] = materialIds.map((materialId) => {
+      const material = job.requirements.find((piece) => piece.materialId === materialId)!.material;
+      return {
+        materialId, materialName: material.name, unit: material.unit, looseStock: Number(material.stock),
+        piecesByState: Object.fromEntries(pieceCounts.filter((row) => row.materialId === materialId).map((row) => [row.state, row._count._all])),
+      };
     });
     const boards: CutBoard[] = available.map((piece) => ({
       id: piece.id, code: piece.code, materialId: piece.materialId, materialName: piece.material.name,
@@ -157,7 +170,7 @@ export class ProductionService {
     }));
     let result: CuttingResult;
     try {
-      result = suggestCuts(requirements, boards, kerfMm, strategy);
+      result = suggestCuts(requirements, boards, kerfMm, strategy, stock);
     } catch (error) {
       throw new BadRequestException((error as Error).message);
     }

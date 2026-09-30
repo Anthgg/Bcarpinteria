@@ -24,6 +24,22 @@ API local en Node.js, TypeScript, NestJS 11 y Prisma sobre PostgreSQL. El fronte
 | Cliente | `GET /api/public/track/:token` y rutas de suscripción/fotos públicas |
 | Resumen | `GET /api/dashboard`, `GET /api/dashboard/audit`, `GET /api/health` |
 
+### Dimensiones y diagnóstico del plano de corte
+
+Las piezas físicas (`MaterialPiece`) y las piezas requeridas (`RequiredPiece`) tienen tres dimensiones en milímetros enteros. La interfaz las llama **Largo × Ancho × Alto**: `lengthMm` = Largo, `widthMm` = Ancho, `thicknessMm` = Alto (en madera, el espesor). No existe una cuarta dimensión.
+
+`POST /api/production/:id/cutting/simulate` solo lee inventario y guarda un `CuttingPlan`. El motor usa únicamente `MaterialPiece` en estado `AVAILABLE` del mismo material y el mismo alto; admite giro de 90° y descuenta el kerf (`cutting_kerf_mm`, 3 mm por defecto) entre piezas. El stock numérico de `InventoryItem` no se usa como tabla. Cada pieza en `unplaced` lleva `reason` y `reasonDetails`, y `diagnostics` resume el embudo de candidatos por material y requerimiento:
+
+| Código | Significado |
+| --- | --- |
+| `NO_PHYSICAL_STOCK` | El material no tiene piezas físicas registradas (aunque tenga stock suelto). |
+| `STOCK_RESERVED` | Hay piezas, ninguna disponible y al menos una reservada. |
+| `NO_AVAILABLE_STOCK` | Hay piezas, pero están consumidas, por decidir o descartadas. |
+| `THICKNESS_MISMATCH` | Hay piezas disponibles, pero ninguna con el alto requerido. |
+| `DIMENSIONS_TOO_LARGE` | La pieza no cabe, ni girada, en ninguna tabla disponible vacía. |
+| `KERF_NO_FIT` | Cabría en el espacio restante si el corte de sierra fuese 0 mm. |
+| `INSUFFICIENT_REMAINING_SPACE` | Cabe en una tabla vacía, pero el stock se agotó con otras piezas. |
+
 Las operaciones de reserva, consumo, importación, pedido y pago usan transacciones. Una venta directa de material reduce stock cuando el artículo controla stock; cancelar un pedido permitido revierte ese movimiento una sola vez y deja su historial.
 
 ## Arranque local
