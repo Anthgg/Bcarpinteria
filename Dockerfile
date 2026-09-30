@@ -11,6 +11,7 @@ FROM deps AS build
 COPY nest-cli.json tsconfig.json tsconfig.build.json ./
 COPY prisma ./prisma
 COPY src ./src
+COPY assets ./assets
 RUN npx prisma generate && npm run build
 
 FROM base AS dev
@@ -28,6 +29,7 @@ RUN mkdir -p /app/uploads && chown node:node /app/uploads
 COPY --chown=node:node --from=build /app/node_modules ./node_modules
 COPY --chown=node:node --from=build /app/dist ./dist
 COPY --chown=node:node --from=build /app/prisma ./prisma
+COPY --chown=node:node --from=build /app/assets ./assets
 COPY --chown=node:node package.json package-lock.json ./
 USER node
 EXPOSE 3000
