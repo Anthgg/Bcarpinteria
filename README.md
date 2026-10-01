@@ -114,6 +114,18 @@ Decisiones preparadas:
   Remove-Item Env:DATABASE_URL
   ```
 - **SSL:** las dos cadenas llevan `sslmode=require`, así que Prisma no se conecta sin cifrado.
+
+### Migración de datos (A015.3)
+
+`scripts/migrate-data-to-supabase.cjs` copia **una sola vez** los datos de PostgreSQL local a Supabase. Exige dos conexiones explícitas: `SOURCE_DATABASE_URL` (local) y `TARGET_DATABASE_URL` (la `DIRECT_URL` de Supabase, Session Pooler). No lee `.env` ni `DATABASE_URL` y no imprime URLs.
+
+- `--dry-run` comprueba sin escribir: mismo esquema y migraciones en ambos lados, destino vacío, orden de foreign keys, referencias huérfanas, `AppSetting` sin secretos y secuencias coherentes con los códigos existentes. Al final muestra el plan.
+- La copia real exige `MIGRATION_CONFIRM=YES`. Copia todo en **una transacción remota** y compara conteos y huellas SHA-256 de cada tabla antes del `COMMIT`; si hay cualquier diferencia, revierte.
+- Los valores se copian como texto de PostgreSQL (`row_to_json` → `json_populate_recordset`): IDs, timestamps, `Decimal`, JSON, `trackingToken` y `passwordHash` quedan idénticos.
+- No hay upserts: si el destino ya tiene filas, aborta. No se migran `Session`, `PushSubscription` (los navegadores se suscriben de nuevo desde el dominio final) ni `SystemProbe`.
+- Se ejecuta dentro de un contenedor temporal del backend, porque PostgreSQL local no publica su puerto, con backend y frontend detenidos y tras un `pg_dump -Fc` guardado fuera del repositorio.
+
+**`PHOTO_STORAGE_PENDING_A016`:** `ProductionPhoto` se migró solo como metadata. Las `url` siguen apuntando a `/api/files/…` y los archivos físicos siguen en el volumen local `carpinteria_uploads`; su paso a Supabase Storage queda para A016.
 - **Claves:** solo la secret key moderna `SUPABASE_SECRET_KEY` (`sb_secret_...`), únicamente en el backend. No se usa la legacy `service_role`. El frontend no recibe claves de Supabase y sigue usando `VITE_API_BASE=/api`.
 - **Storage:** `STORAGE_DRIVER=local` mantiene las fotos en `UPLOAD_DIR` (volumen `carpinteria_uploads`). El valor `supabase` usará el bucket privado `SUPABASE_STORAGE_BUCKET` en una fase posterior, y el cambio se hará solo por variable de entorno.
 - **Auth:** no cambia. Se mantienen `User`, `Session`, el JWT propio y el RBAC `TESTER`/`ADMIN`/`OPERARIO`; Supabase Auth no se usa.
