@@ -10,7 +10,8 @@ import {
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './auth.dto';
-import { AuthRequest, CurrentUser, Public, AuthUser } from '../common/auth';
+import { AuthRequest, CurrentUser, Public } from '../common/auth';
+import type { AuthUser } from '../common/auth';
 
 const ACCESS_COOKIE = 'carp_access';
 const REFRESH_COOKIE = 'carp_refresh';

@@ -16,7 +16,8 @@ import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { AppRole } from '@prisma/client';
-import { AuthUser, CurrentUser, Roles } from '../common/auth';
+import { CurrentUser, Roles } from '../common/auth';
+import type { AuthUser } from '../common/auth';
 import { ProductionService } from './production.service';
 
 type BodyObject = Record<string, unknown>;

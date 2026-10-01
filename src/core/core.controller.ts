@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { AppRole } from '@prisma/client';
-import { CurrentUser, Roles, AuthUser } from '../common/auth';
+import { CurrentUser, Roles } from '../common/auth';
+import type { AuthUser } from '../common/auth';
 import { CoreService } from './core.service';
 import { INVENTORY_UNITS } from '../common/units';
 
