@@ -93,6 +93,23 @@ Los cambios de etapa nombran la línea del pedido; el aviso global de listo se e
 
 La prueba administrativa muestra únicamente suscripciones activas de los códigos incluidos en `PUSH_TEST_ORDER_CODES` y envía a una sola fila seleccionada. No transmite los datos de suscripción al navegador.
 
+## Preparación Supabase
+
+Fase A015.0: solo existen plantillas. La aplicación local sigue usando PostgreSQL en Docker; `compose.yml` no lee ningún archivo de Supabase y nada se conecta a Supabase todavía.
+
+1. Copia la plantilla (desde `Bcarpinteria`): `Copy-Item .env.supabase.example .env.supabase`.
+2. Rellena `.env.supabase` a mano con los datos del proyecto Supabase. Cada variable explica en la plantilla qué contiene, si es secreta, dónde obtenerla y si se usa ahora o más adelante.
+3. No compartas ese archivo ni sus valores. `.env.supabase` y `.env.production` están en `.gitignore` y `.dockerignore`; solo se versionan las plantillas `*.example`.
+4. No ejecutes `prisma migrate`, `prisma db push` ni el seed contra Supabase hasta la siguiente fase (A015.1).
+
+Decisiones preparadas:
+
+- **`DATABASE_URL` (runtime):** el Supavisor transaction pooler, puerto `6543`, con `pgbouncer=true&connection_limit=1` para Prisma Client, pensado para Cloud Run.
+- **`DIRECT_URL` (migraciones):** el Supavisor session pooler, puerto `5432`, o la conexión directa si el equipo tiene conectividad IPv6. Prisma 6.19 la toma con `directUrl = env("DIRECT_URL")` en el `datasource` de `schema.prisma`. Se añadirá en A015.1, porque hoy el entorno local no define `DIRECT_URL` y Prisma fallaría al validar. No se usa `prisma.config.ts`, que es opcional en Prisma 6 y obligatorio recién en Prisma 7.
+- **Claves:** solo la secret key moderna `SUPABASE_SECRET_KEY` (`sb_secret_...`), únicamente en el backend. No se usa la legacy `service_role`. El frontend no recibe claves de Supabase y sigue usando `VITE_API_BASE=/api`.
+- **Storage:** `STORAGE_DRIVER=local` mantiene las fotos en `UPLOAD_DIR` (volumen `carpinteria_uploads`). El valor `supabase` usará el bucket privado `SUPABASE_STORAGE_BUCKET` en una fase posterior, y el cambio se hará solo por variable de entorno.
+- **Auth:** no cambia. Se mantienen `User`, `Session`, el JWT propio y el RBAC `TESTER`/`ADMIN`/`OPERARIO`; Supabase Auth no se usa.
+
 ## Comprobaciones
 
 Desde `Bcarpinteria`:
@@ -107,7 +124,7 @@ npx prisma migrate deploy
 
 ## Fuera de V1
 
-No se conecta Supabase ni servicios cloud, SUNAT, pasarelas de pago, WhatsApp Business API, CAD o IA. WhatsApp abre un mensaje prellenado que una persona envía manualmente.
+No se conecta Supabase (solo hay plantillas, ver «Preparación Supabase») ni servicios cloud, SUNAT, pasarelas de pago, WhatsApp Business API, CAD o IA. WhatsApp abre un mensaje prellenado que una persona envía manualmente.
 
 ## Presentación local V1
 

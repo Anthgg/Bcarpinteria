@@ -1,8 +1,14 @@
 node_modules/
 dist/
 coverage/
+# Entornos con secretos (solo se versionan las plantillas *.example)
 .env
 .env.local
+.env.*.local
+.env.supabase
+.env.production
+!.env.example
+!.env.supabase.example
 *.log
 .DS_Store
 
