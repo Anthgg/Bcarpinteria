@@ -10,7 +10,7 @@
     "start:dev": "prisma migrate deploy && nodemon --legacy-watch --watch src --ext ts --delay 0.6 --exec \"npm run build && node dist/main.js\"",
     "start:dev:remote": "nodemon --legacy-watch --watch src --ext ts --delay 0.6 --exec \"npm run build && node dist/main.js\"",
     "start:dev:watch": "nest start --watch",
-    "start:prod": "prisma migrate deploy && node dist/main.js",
+    "start:prod": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
