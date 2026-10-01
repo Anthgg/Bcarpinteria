@@ -167,6 +167,16 @@ La misma app local puede ejecutarse contra Supabase (base de datos y Storage) co
 - Con `APP_ENV=SUPABASE`, la API no arranca si `DATABASE_URL` no usa el puerto 6543 con `pgbouncer=true`, `sslmode=require` y `connection_limit` (`assertRuntimeDatabase`).
 - `GET /api/health` informa `environment`, `database.provider` y `storage` (driver y estado, con lectura de metadata del bucket cacheada 60 s). Es de solo lectura y no muestra host, credenciales ni project ref.
 
+### Producción en Cloud Run (A018)
+
+La guía completa está en `Carpinteria/docs/CLOUD_RUN_DEPLOYMENT.md`. Para el backend:
+
+- `npm run start:prod` y la imagen (`Dockerfile`, target `production`) ejecutan solo `node dist/main.js`. **Nunca migran**: las migraciones son un paso previo y explícito (`npm run db:supabase:deploy`). La imagen no incluye devDependencies, `.env*` ni el Excel.
+- `APP_ENV=PRODUCTION` aplica las mismas reglas del pooler que `SUPABASE`, y además exige `STORAGE_DRIVER=supabase` y que `DIRECT_URL` no llegue al runtime.
+- `TRUST_PROXY_HOPS` (vacío por defecto; `2` en Cloud Run) hace que `req.ip`, que usa el límite de intentos de login, sea la IP real del cliente detrás de Google Front End y nginx.
+- Las cookies de sesión son `HttpOnly`, `SameSite=Lax` y `Secure` con `NODE_ENV=production`.
+- En `PRODUCTION`, la importación desde el Excel original está deshabilitada (400 con explicación): el archivo solo existe en el entorno local.
+
 ## Comprobaciones
 
 Desde `Bcarpinteria`:
