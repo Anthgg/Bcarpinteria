@@ -1,10 +1,11 @@
 import { Body, Controller, Delete, Get, Headers, Param, Post, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { resolve } from 'node:path';
 import { AppRole } from '@prisma/client';
 import { Public, Roles } from '../common/auth';
 import { PublicService } from './public.service';
 import { DocumentsService } from '../documents.service';
+import { ProductionService } from '../production/production.service';
+import { sendPhoto } from '../storage/photo-storage.service';
 
 @Controller('public/track')
 @Public()
@@ -27,19 +28,18 @@ export class PublicController {
 
   @Get(':token/photos/:photoId')
   async photo(@Param('token') token: string, @Param('photoId') photoId: string, @Res() response: Response) {
-    const filename = await this.tracking.photo(token, photoId);
-    response.setHeader('Cache-Control', 'public, max-age=300');
-    response.sendFile(filename, { root: resolve(process.env.UPLOAD_DIR ?? 'uploads') });
+    // Se revalida en cada vista: si la foto pasa a interna deja de servirse de inmediato.
+    sendPhoto(response, await this.tracking.photo(token, photoId), 'private, no-cache');
   }
 }
 
 @Controller('files')
 export class FilesController {
+  constructor(private readonly production: ProductionService) {}
+
   @Get(':filename')
-  photo(@Param('filename') filename: string, @Res() response: Response) {
-    if (!/^[0-9a-f-]{36}\.(jpg|png|webp)$/.test(filename)) return response.status(404).end();
-    response.setHeader('Cache-Control', 'private, max-age=300');
-    response.sendFile(filename, { root: resolve(process.env.UPLOAD_DIR ?? 'uploads') });
+  async photo(@Param('filename') filename: string, @Res() response: Response) {
+    sendPhoto(response, await this.production.internalPhotoFile(filename), 'private, max-age=300');
   }
 }
 

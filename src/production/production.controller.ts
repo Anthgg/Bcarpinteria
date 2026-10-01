@@ -11,6 +11,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import type { MulterOptions } from '@nestjs/platform-express/multer/interfaces/multer-options.interface';
 import { diskStorage } from 'multer';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -19,10 +20,31 @@ import { AppRole } from '@prisma/client';
 import { CurrentUser, Roles } from '../common/auth';
 import type { AuthUser } from '../common/auth';
 import { ProductionService } from './production.service';
+import { PHOTO_MAX_BYTES } from '../storage/photo-storage.service';
 
 type BodyObject = Record<string, unknown>;
 const uploadDirectory = () => resolve(process.env.UPLOAD_DIR ?? 'uploads');
 const imageExtension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' } as const;
+
+// multer deja el archivo en UPLOAD_DIR; el servicio valida el contenido y decide el storage definitivo.
+export const PHOTO_UPLOAD_OPTIONS: MulterOptions = {
+  storage: diskStorage({
+    destination: (_request, _file, callback) => {
+      const directory = uploadDirectory();
+      mkdirSync(directory, { recursive: true });
+      callback(null, directory);
+    },
+    filename: (_request, file, callback) => {
+      const extension = imageExtension[file.mimetype as keyof typeof imageExtension];
+      callback(null, `${randomUUID()}.${extension ?? 'invalid'}`);
+    },
+  }),
+  limits: { fileSize: PHOTO_MAX_BYTES, files: 1 },
+  fileFilter: (_request, file, callback) => {
+    if (!Object.prototype.hasOwnProperty.call(imageExtension, file.mimetype)) callback(new BadRequestException('Usa una imagen PNG, JPEG o WebP.'), false);
+    else callback(null, true);
+  },
+};
 
 @Controller('production')
 @Roles(AppRole.ADMIN, AppRole.TESTER, AppRole.OPERARIO)
@@ -76,24 +98,7 @@ export class ProductionController {
   resolveIncident(@CurrentUser() actor: AuthUser, @Param('id') id: string) { return this.production.resolveIncident(actor, id); }
 
   @Post(':id/photos')
-  @UseInterceptors(FileInterceptor('photo', {
-    storage: diskStorage({
-      destination: (_request, _file, callback) => {
-        const directory = uploadDirectory();
-        mkdirSync(directory, { recursive: true });
-        callback(null, directory);
-      },
-      filename: (_request, file, callback) => {
-        const extension = imageExtension[file.mimetype as keyof typeof imageExtension];
-        callback(null, `${randomUUID()}.${extension ?? 'invalid'}`);
-      },
-    }),
-    limits: { fileSize: 8 * 1024 * 1024, files: 1 },
-    fileFilter: (_request, file, callback) => {
-      if (!Object.prototype.hasOwnProperty.call(imageExtension, file.mimetype)) callback(new BadRequestException('Usa una imagen PNG, JPEG o WebP.'), false);
-      else callback(null, true);
-    },
-  }))
+  @UseInterceptors(FileInterceptor('photo', PHOTO_UPLOAD_OPTIONS))
   photo(
     @CurrentUser() actor: AuthUser,
     @Param('id') id: string,

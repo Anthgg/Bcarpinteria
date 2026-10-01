@@ -16,6 +16,7 @@ import { ProductionService } from './production/production.service';
 import { DocumentsController, FilesController } from './public/public.controller';
 import { PublicController } from './public/public.controller';
 import { PublicService } from './public/public.service';
+import { PhotoStorageService } from './storage/photo-storage.service';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { PublicService } from './public/public.service';
     PublicService,
     DocumentsService,
     DashboardService,
+    PhotoStorageService,
     CsrfGuard,
     AccessGuard,
     RolesGuard,

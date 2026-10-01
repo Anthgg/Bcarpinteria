@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
@@ -20,6 +21,7 @@ import { basename, resolve } from 'node:path';
 import { PrismaService } from '../prisma.service';
 import { AuthUser } from '../common/auth';
 import { CoreService } from '../core/core.service';
+import { PhotoStorageService } from '../storage/photo-storage.service';
 import { CutBoard, CutRequirement, CutStrategy, CuttingResult, MAX_KERF_MM, MaterialStockContext, suggestCuts } from './cutting-engine';
 
 const PROGRESS: Record<ProductionStage, number> = {
@@ -56,6 +58,7 @@ export class ProductionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly core: CoreService,
+    @Optional() private readonly storage: PhotoStorageService = new PhotoStorageService({ driver: 'local' }),
   ) {}
 
   private async requireJob(id: string, tx: Prisma.TransactionClient | PrismaService = this.prisma) {
@@ -85,7 +88,7 @@ export class ProductionService {
         stageHistory: { include: { user: { select: { name: true } } }, orderBy: { createdAt: 'asc' } },
         notes: { include: { user: { select: { name: true } } }, orderBy: { createdAt: 'desc' } },
         incidents: { include: { user: { select: { name: true } } }, orderBy: { createdAt: 'desc' } },
-        photos: { include: { user: { select: { name: true } } }, orderBy: { createdAt: 'desc' } },
+        photos: { include: { user: { select: { name: true } } }, omit: { storagePath: true }, orderBy: { createdAt: 'desc' } },
         cutPlans: { orderBy: { createdAt: 'desc' }, take: 5 },
         pieceReservations: { include: { piece: { include: { material: true } } } },
         itemReservations: { include: { item: true } },
@@ -415,6 +418,8 @@ export class ProductionService {
     }
     let job: Awaited<ReturnType<ProductionService['requireJob']>>;
     let photo: Awaited<ReturnType<PrismaService['productionPhoto']['create']>>;
+    const photoId = filename.slice(0, 36);
+    let storagePath: string | null = null;
     try {
       job = await this.requireJob(jobId);
       const contents = await readFile(filePath);
@@ -423,16 +428,21 @@ export class ProductionService {
       const isWebp = expectedExtension === 'webp' && contents.length >= 12 && contents.toString('ascii', 0, 4) === 'RIFF' && contents.toString('ascii', 8, 12) === 'WEBP';
       if (!isJpeg && !isPng && !isWebp) throw new BadRequestException('El contenido del archivo no coincide con una imagen JPEG, PNG o WebP.');
       const safeCaption = caption ? text(caption, 'Descripción', 180) : null;
+      // Primero el almacenamiento y después la metadata: nunca queda un registro apuntando a un objeto inexistente.
+      storagePath = await this.storage.persist(jobId, photoId, expectedExtension, contents);
       photo = await this.prisma.productionPhoto.create({ data: {
-        jobId, url: `/api/files/${filename}`, caption: safeCaption,
+        id: photoId, jobId, url: `/api/files/${filename}`, storagePath, caption: safeCaption,
         public: isPublic, userId: actor.id,
       } });
     } catch (error) {
       await unlink(filePath).catch(() => undefined);
+      await this.storage.discard(storagePath);
       if (error instanceof BadRequestException || error instanceof NotFoundException) throw error;
       if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') throw new BadRequestException('No se pudo leer la fotografía cargada.');
       throw error;
     }
+    // Con Supabase el archivo temporal de multer ya no hace falta; con local es el archivo definitivo.
+    if (storagePath) await unlink(filePath).catch(() => undefined);
     await this.core.audit(actor.id, 'PRODUCTION_PHOTO_ADDED', 'ProductionPhoto', photo.id, { jobId, public: isPublic });
     if (isPublic) await this.notify(job.orderId, { type: 'public-photo' });
     return photo;
@@ -487,18 +497,22 @@ export class ProductionService {
     return { sent: true, orderCode: subscription.order.code };
   }
 
-  async getPhotoFile(id: string) {
-    const photo = await this.prisma.productionPhoto.findUnique({ where: { id } });
+  // Ruta interna /api/files/:filename (requiere sesión). Solo sirve archivos que pertenecen a una fotografía registrada.
+  async internalPhotoFile(filename: string) {
+    if (!/^[0-9a-f-]{36}.(jpg|png|webp)$/.test(filename)) throw new NotFoundException('Fotografía no encontrada.');
+    const photo = await this.prisma.productionPhoto.findFirst({ where: { url: `/api/files/${filename}` }, select: { url: true, storagePath: true } });
     if (!photo) throw new NotFoundException('Fotografía no encontrada.');
-    return photo.url.split('/').at(-1)!;
+    return this.storage.open(photo);
   }
 
+  // Seguimiento público: token válido + fotografía de ese pedido + public=true, ANTES de tocar el storage.
   async publicPhotoFile(token: string, id: string) {
     const photo = await this.prisma.productionPhoto.findFirst({
       where: { id, public: true, job: { order: { trackingToken: token } } },
+      select: { url: true, storagePath: true },
     });
     if (!photo) throw new NotFoundException('Fotografía pública no encontrada.');
-    return photo.url.split('/').at(-1)!;
+    return this.storage.open(photo);
   }
 
   private isPushConfigured() {

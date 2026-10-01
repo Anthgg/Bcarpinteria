@@ -430,15 +430,17 @@ model Incident {
 }
 
 model ProductionPhoto {
-  id        String        @id @default(uuid())
-  jobId     String
-  job       ProductionJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  url       String
-  caption   String?
-  public    Boolean       @default(false)
-  userId    String?
-  user      User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
-  createdAt DateTime      @default(now())
+  id          String        @id @default(uuid())
+  jobId       String
+  job         ProductionJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  url         String
+  // Objeto en Supabase Storage (production/{jobId}/{photoId}.{ext}); null = solo archivo local legado.
+  storagePath String?       @unique
+  caption     String?
+  public      Boolean       @default(false)
+  userId      String?
+  user        User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt   DateTime      @default(now())
 }
 
 model PushSubscription {
