@@ -77,7 +77,8 @@ Compose lee `Carpinteria/.env` para sus variables de infraestructura (ver `.env.
 - `JWT_SECRET`: clave estable de al menos 32 bytes para conservar sesiones válidas tras reiniciar el proceso. En desarrollo vacío crea una clave efímera y cierra las sesiones firmadas al reiniciar.
 - `CORS_ORIGINS`: lista separada por coma; por defecto permite los puertos locales 8080 y 5173.
 - `BD_PATH`: libro fuente, de solo lectura.
-- `UPLOAD_DIR`: almacenamiento de fotos local persistente.
+- `UPLOAD_DIR`: carpeta de fotos del driver `local` (volumen persistente `carpinteria_uploads`).
+- `STORAGE_DRIVER`: `local` (por defecto) o `supabase`. Ver «Almacenamiento de fotografías».
 - `PUBLIC_BASE_URL`: origen que se inserta en avisos de Web Push.
 - `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`: opcionales y locales en `Bcarpinteria/.env`. Sin ellas, el seguimiento funciona sin pedir permiso de notificación. La clave privada solo llega al proceso backend.
 - `PUSH_TEST_ORDER_CODES`: allowlist opcional de pedidos QA para la pantalla de prueba (sin destinos, la prueba queda desactivada).
@@ -95,7 +96,7 @@ La prueba administrativa muestra únicamente suscripciones activas de los códig
 
 ## Preparación Supabase
 
-La aplicación local sigue usando PostgreSQL en Docker; `compose.yml` no lee ningún archivo de Supabase. En Supabase solo existe el esquema (3 migraciones aplicadas en A015.2), sin datos.
+La aplicación local sigue usando PostgreSQL en Docker y `STORAGE_DRIVER=local`; `compose.yml` no lee ningún archivo de Supabase. Supabase tiene el esquema (migraciones 0001–0004), los datos copiados en A015.3 y las fotografías en el bucket privado `production-photos` (A016).
 
 1. Copia la plantilla (desde `Bcarpinteria`): `Copy-Item .env.supabase.example .env.supabase`.
 2. Rellena `.env.supabase` a mano con los datos del proyecto Supabase. Cada variable explica en la plantilla qué contiene, si es secreta, dónde obtenerla y si se usa ahora o más adelante.
@@ -114,6 +115,8 @@ Decisiones preparadas:
   Remove-Item Env:DATABASE_URL
   ```
 - **SSL:** las dos cadenas llevan `sslmode=require`, así que Prisma no se conecta sin cifrado.
+- **Claves:** solo la secret key moderna `SUPABASE_SECRET_KEY` (`sb_secret_...`), únicamente en el backend. No se usa la legacy `service_role`. El frontend no recibe claves de Supabase y sigue usando `VITE_API_BASE=/api`.
+- **Auth:** no cambia. Se mantienen `User`, `Session`, el JWT propio y el RBAC `TESTER`/`ADMIN`/`OPERARIO`; Supabase Auth no se usa.
 
 ### Migración de datos (A015.3)
 
@@ -125,10 +128,35 @@ Decisiones preparadas:
 - No hay upserts: si el destino ya tiene filas, aborta. No se migran `Session`, `PushSubscription` (los navegadores se suscriben de nuevo desde el dominio final) ni `SystemProbe`.
 - Se ejecuta dentro de un contenedor temporal del backend, porque PostgreSQL local no publica su puerto, con backend y frontend detenidos y tras un `pg_dump -Fc` guardado fuera del repositorio.
 
-**`PHOTO_STORAGE_PENDING_A016`:** `ProductionPhoto` se migró solo como metadata. Las `url` siguen apuntando a `/api/files/…` y los archivos físicos siguen en el volumen local `carpinteria_uploads`; su paso a Supabase Storage queda para A016.
-- **Claves:** solo la secret key moderna `SUPABASE_SECRET_KEY` (`sb_secret_...`), únicamente en el backend. No se usa la legacy `service_role`. El frontend no recibe claves de Supabase y sigue usando `VITE_API_BASE=/api`.
-- **Storage:** `STORAGE_DRIVER=local` mantiene las fotos en `UPLOAD_DIR` (volumen `carpinteria_uploads`). El valor `supabase` usará el bucket privado `SUPABASE_STORAGE_BUCKET` en una fase posterior, y el cambio se hará solo por variable de entorno.
-- **Auth:** no cambia. Se mantienen `User`, `Session`, el JWT propio y el RBAC `TESTER`/`ADMIN`/`OPERARIO`; Supabase Auth no se usa.
+En A015.3 `ProductionPhoto` se copió solo como metadata; los archivos se migraron en A016 (abajo).
+
+### Almacenamiento de fotografías (A016)
+
+`src/storage/photo-storage.service.ts` define dónde viven los bytes, elegido por `STORAGE_DRIVER`:
+
+| Driver | Dónde | Variables |
+|---|---|---|
+| `local` (por defecto) | `UPLOAD_DIR`, volumen `carpinteria_uploads` | `UPLOAD_DIR` |
+| `supabase` | bucket **privado** `production-photos`, ruta `production/{jobId}/{photoId}.{ext}` | `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SUPABASE_STORAGE_BUCKET` |
+
+- **Flujo de subida:** React → NestJS (multer, límite 8 MB, solo JPEG/PNG/WebP) → validación del contenido real (magic bytes) → storage → recién entonces `ProductionPhoto`. Si la metadata falla, el objeto subido se retira. Nunca se sobrescribe (`upsert: false`).
+- **Referencia estable:** `ProductionPhoto.url` sigue siendo la ruta del backend (`/api/files/{uuid}.{ext}`) y `storagePath` (migración `0004_photo_storage`) guarda la ruta del objeto. No se guardan URLs firmadas ni públicas.
+- **Lectura:** el navegador siempre pide la imagen al backend.
+  - `/api/files/:file` exige sesión y solo sirve archivos de una foto registrada.
+  - `/api/public/track/:token/photos/:id` exige un token válido, que la foto sea de ese pedido y `public=true`, antes de tocar el storage.
+  - El backend entrega los bytes él mismo (proxy), así que el navegador no ve la URL de Supabase, ni tokens, ni URLs firmadas.
+  - Las respuestas públicas usan `Cache-Control: private, no-cache`: al pasar una foto a interna, deja de servirse en la siguiente petición.
+- **Transición:** con `supabase`, una foto sin `storagePath` se sigue sirviendo desde el archivo local legado. Con `local` se ignora `storagePath` y se usa siempre `UPLOAD_DIR`.
+- **Visibilidad:** cambiar `public` no mueve archivos; solo cambia la autorización. No existe borrado de fotos; el driver no borra nada, salvo el objeto huérfano de una subida fallida.
+- **Bucket y RLS:** el bucket es privado (`public=false`), admite `image/jpeg`, `image/png` e `image/webp` y tiene un límite de 8 MB. Solo lo usa el backend con la secret key, que omite RLS. Por eso **no** hay políticas sobre `storage.objects` y `anon` no tiene acceso; no se deben crear políticas públicas.
+
+**Migración de las fotos existentes:** `scripts/migrate-photos-to-supabase.cjs` usa `SOURCE_DATABASE_URL`, `TARGET_DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SUPABASE_STORAGE_BUCKET` y `UPLOAD_DIR`.
+- `--dry-run [--json]` muestra el inventario: registros, archivos, tamaño, MIME real, SHA-256 y ruta de destino.
+- `PHOTO_MIGRATION_CONFIRM=YES` crea el bucket privado si falta y sube cada foto sin sobrescribir. Después descarga el objeto y compara bytes, y solo entonces guarda `storagePath` en ambas bases. Se ejecuta en el contenedor del backend porque necesita el volumen y la base local. No borra archivos locales.
+
+**Rollback:** basta `STORAGE_DRIVER=local`, sin cambios de código. Los archivos del volumen `carpinteria_uploads` se conservan y sirven todas las fotos.
+
+**Prueba real del bucket:** `SUPABASE_STORAGE_IT=1 npx jest src/storage/supabase-object-store.int.spec.ts` (con las variables de Supabase cargadas) sube, lee y borra un objeto bajo `qa/`. Sin esa variable, la suite la omite.
 
 ## Comprobaciones
 
