@@ -8,6 +8,7 @@
     "build": "nest build",
     "start": "nest start",
     "start:dev": "prisma migrate deploy && nodemon --legacy-watch --watch src --ext ts --delay 0.6 --exec \"npm run build && node dist/main.js\"",
+    "start:dev:remote": "nodemon --legacy-watch --watch src --ext ts --delay 0.6 --exec \"npm run build && node dist/main.js\"",
     "start:dev:watch": "nest start --watch",
     "start:prod": "prisma migrate deploy && node dist/main.js",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
@@ -20,7 +21,9 @@
     "prisma:deploy": "prisma migrate deploy",
     "seed": "node prisma/seed.js",
     "seed:demo-users": "node scripts/seed-demo-users.cjs",
-    "smoke:v1": "node scripts/v1-smoke.mjs"
+    "smoke:v1": "node scripts/v1-smoke.mjs",
+    "db:supabase:status": "node scripts/supabase-migrate.cjs status",
+    "db:supabase:deploy": "node scripts/supabase-migrate.cjs deploy"
   },
   "dependencies": {
     "@nestjs/common": "^11.2.6",
