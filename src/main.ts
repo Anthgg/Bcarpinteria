@@ -3,11 +3,14 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
-import { assertRuntimeDatabase, corsOriginsFromEnv } from './common/security-config';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { assertRuntimeDatabase, corsOriginsFromEnv, trustProxyHops } from './common/security-config';
 
 async function bootstrap() {
   assertRuntimeDatabase();
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const hops = trustProxyHops();
+  if (hops) app.set('trust proxy', hops);
   app.use(cookieParser());
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }));
   app.setGlobalPrefix('api');

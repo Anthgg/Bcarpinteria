@@ -42,7 +42,7 @@ export class HealthService {
   }
 
   get databaseProvider(): string {
-    return this.environment === 'SUPABASE' ? 'PostgreSQL (Supabase)' : 'PostgreSQL (Docker local)';
+    return ['SUPABASE', 'PRODUCTION'].includes(this.environment) ? 'PostgreSQL (Supabase)' : 'PostgreSQL (Docker local)';
   }
 
   async checkDatabase(): Promise<HealthReport['database']> {

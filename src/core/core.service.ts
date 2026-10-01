@@ -374,6 +374,9 @@ export class CoreService {
   }
 
   private async readWorkbook() {
+    if (process.env.APP_ENV === 'PRODUCTION') {
+      throw new BadRequestException('La importación desde el Excel original no está disponible en producción. Usa el entorno local o registra los artículos desde Inventario.');
+    }
     const file = process.env.BD_PATH ?? './bd/inventario g.xlsx';
     const workbook = new ExcelJS.Workbook();
     try {
