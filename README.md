@@ -20,7 +20,7 @@ API local en Node.js, TypeScript, NestJS 11 y Prisma sobre PostgreSQL. El fronte
 | Inventario | `GET /api/inventory`, `/pieces`, `/movements`; `GET /api/inventory/import/preview`; `POST /api/inventory/import`; CRUD y stock bajo `/api/inventory/items`; piezas bajo `/api/inventory/pieces` |
 | Clientes/productos | `GET/POST/PUT/DELETE /api/customers`; `GET/POST/PUT/DELETE /api/products` |
 | Pedidos | `GET/POST /api/orders`, `GET /api/orders/:id`, `PUT /api/orders/:id/status`, `POST /api/orders/:id/payments`, `GET /api/orders/:id/pdf` |
-| Producción | `GET /api/production`, `GET /api/production/:id` y rutas de materiales, simulación, reserva, corte, etapas, pausa, notas, incidencias y fotos |
+| Producción | `GET /api/production`, `GET /api/production/:id` y rutas de materiales, simulación, reserva, corte, etapas, pausa, notas, incidencias, fotos y visibilidad de fotos |
 | Cliente | `GET /api/public/track/:token` y rutas de suscripción/fotos públicas |
 | Resumen | `GET /api/dashboard`, `GET /api/dashboard/audit`, `GET /api/health` |
 
@@ -71,7 +71,7 @@ Opcionalmente configura cada par `SEED_TESTER_EMAIL`/`SEED_TESTER_PASSWORD` y `S
 
 ## Variables
 
-Compose lee `Carpinteria/.env` (ver `.env.example`). El backend también ofrece `Bcarpinteria/.env.example` para ejecución local directa.
+Compose lee `Carpinteria/.env` para sus variables de infraestructura (ver `.env.example`). En el modo local, el servicio backend carga opcionalmente `Bcarpinteria/.env`; allí se guardan las claves VAPID fuera de Git.
 
 - `DATABASE_URL`, `POSTGRES_*`: PostgreSQL local. En Compose la URL apunta al servicio `postgres`.
 - `JWT_SECRET`: clave estable de al menos 32 bytes para conservar sesiones válidas tras reiniciar el proceso. En desarrollo vacío crea una clave efímera y cierra las sesiones firmadas al reiniciar.
@@ -79,7 +79,19 @@ Compose lee `Carpinteria/.env` (ver `.env.example`). El backend también ofrece 
 - `BD_PATH`: libro fuente, de solo lectura.
 - `UPLOAD_DIR`: almacenamiento de fotos local persistente.
 - `PUBLIC_BASE_URL`: origen que se inserta en avisos de Web Push.
-- `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`: opcionales. Sin ellas, el resto del seguimiento funciona y no se solicitan permisos de notificación.
+- `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`: opcionales y locales en `Bcarpinteria/.env`. Sin ellas, el seguimiento funciona sin pedir permiso de notificación. La clave privada solo llega al proceso backend.
+- `PUSH_TEST_ORDER_CODES`: allowlist opcional de pedidos QA para la pantalla de prueba (sin destinos, la prueba queda desactivada).
+
+### Web Push local
+
+1. Copia `Bcarpinteria/.env.example` a `Bcarpinteria/.env` si todavía no existe.
+2. Genera el par local con `npx web-push generate-vapid-keys` desde `Bcarpinteria` y guarda los valores únicamente en ese `.env` ignorado por Git.
+3. Define `VAPID_SUBJECT` con un contacto de desarrollo válido y `PUSH_TEST_ORDER_CODES=PED-00007,PED-00008` para restringir el botón de prueba a esos pedidos QA.
+4. Reinicia el servicio backend para que Docker cargue las variables. La interfaz detecta si Web Push quedó disponible.
+
+Los cambios de etapa nombran la línea del pedido; el aviso global de listo se envía cuando todas las líneas terminan. Solo generan avisos las notas públicas y fotos que se comparten públicamente. Notas internas, stock, edición de piezas, reservas y simulaciones no generan push. Desactivar avisos marca desactivada la suscripción de ese pedido sin eliminar la suscripción compartida del navegador. Las suscripciones expiradas 404/410 se deshabilitan.
+
+La prueba administrativa muestra únicamente suscripciones activas de los códigos incluidos en `PUSH_TEST_ORDER_CODES` y envía a una sola fila seleccionada. No transmite los datos de suscripción al navegador.
 
 ## Comprobaciones
 

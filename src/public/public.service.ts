@@ -60,11 +60,15 @@ export class PublicService {
     };
   }
 
-  notificationConfig(token: string) {
-    return this.findOrder(token).then(() => ({
-      enabled: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT),
-      publicKey: process.env.VAPID_PUBLIC_KEY ?? null,
-    }));
+  async notificationConfig(token: string, endpoint?: string) {
+    const order = await this.findOrder(token);
+    const configured = Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
+    const subscribed = configured && endpoint && endpoint.startsWith('https://') && endpoint.length <= 2048
+      ? Boolean(await this.prisma.pushSubscription.findFirst({
+        where: { orderId: order.id, endpoint, enabled: true }, select: { id: true },
+      }))
+      : false;
+    return { enabled: configured, publicKey: process.env.VAPID_PUBLIC_KEY ?? null, subscribed };
   }
 
   async subscribe(token: string, input: Record<string, unknown>) {
@@ -76,7 +80,9 @@ export class PublicService {
     const keys = input.keys as Record<string, unknown> | undefined;
     const p256dh = String(keys?.p256dh ?? '');
     const auth = String(keys?.auth ?? '');
-    if (!endpoint.startsWith('https://') || endpoint.length > 2048 || p256dh.length < 20 || auth.length < 8) {
+    let validEndpoint = false;
+    try { validEndpoint = new URL(endpoint).protocol === 'https:'; } catch { /* invalid endpoint */ }
+    if (!validEndpoint || endpoint.length > 2048 || p256dh.length < 20 || auth.length < 8) {
       throw new BadRequestException('La suscripción de notificaciones no es válida.');
     }
     return this.prisma.pushSubscription.upsert({

@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { PublicService } from './public.service';
 
 describe('PublicService tracking', () => {
@@ -19,11 +19,29 @@ describe('PublicService tracking', () => {
     }],
   };
   const findUnique = jest.fn();
+  const pushFindFirst = jest.fn();
+  const pushUpsert = jest.fn();
+  const pushUpdateMany = jest.fn();
   let service: PublicService;
+  let priorVapid: Record<string, string | undefined> = {};
 
   beforeEach(() => {
+    priorVapid = Object.fromEntries(['VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT'].map((key) => [key, process.env[key]]));
     findUnique.mockReset().mockResolvedValue(order);
-    service = new PublicService({ order: { findUnique } } as never, { publicPhotoFile: jest.fn() } as never);
+    pushFindFirst.mockReset();
+    pushUpsert.mockReset();
+    pushUpdateMany.mockReset();
+    service = new PublicService({
+      order: { findUnique },
+      pushSubscription: { findFirst: pushFindFirst, upsert: pushUpsert, updateMany: pushUpdateMany },
+    } as never, { publicPhotoFile: jest.fn() } as never);
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(priorVapid)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   it('returns only public order tracking fields and filters notes/photos in the database query', async () => {
@@ -61,5 +79,71 @@ describe('PublicService tracking', () => {
     const tracking = await service.track(token);
 
     expect(tracking).toMatchObject({ progress: 50, currentStage: 'ORDER_RECEIVED' });
+  });
+
+  it('checks an existing subscription only for the token order and endpoint', async () => {
+    const previous = {
+      VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY,
+      VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY,
+      VAPID_SUBJECT: process.env.VAPID_SUBJECT,
+    };
+    process.env.VAPID_PUBLIC_KEY = 'public-test-key';
+    process.env.VAPID_PRIVATE_KEY = 'private-test-key';
+    process.env.VAPID_SUBJECT = 'mailto:test@example.invalid';
+    pushFindFirst.mockResolvedValue({ id: 'subscription-1' });
+
+    try {
+      await expect(service.notificationConfig(token, 'https://push.example.invalid/subscription'))
+        .resolves.toEqual({ enabled: true, publicKey: 'public-test-key', subscribed: true });
+      expect(pushFindFirst).toHaveBeenCalledWith({
+        where: { orderId: order.id, endpoint: 'https://push.example.invalid/subscription', enabled: true },
+        select: { id: true },
+      });
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it('upserts by order and endpoint so repeated activation remains idempotent', async () => {
+    process.env.VAPID_PUBLIC_KEY = 'public-test-key';
+    process.env.VAPID_PRIVATE_KEY = 'private-test-key';
+    process.env.VAPID_SUBJECT = 'mailto:test@example.invalid';
+    pushUpsert.mockResolvedValue({ id: 'subscription-1', enabled: true, createdAt: eventAt });
+
+    const body = {
+      endpoint: 'https://push.example.invalid/subscription',
+      keys: { p256dh: 'a'.repeat(30), auth: 'b'.repeat(12) },
+    };
+    await service.subscribe(token, body);
+    await service.subscribe(token, body);
+
+    expect(pushUpsert).toHaveBeenCalledTimes(2);
+    expect(pushUpsert).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: { orderId_endpoint: { orderId: order.id, endpoint: body.endpoint } },
+      create: { orderId: order.id, endpoint: body.endpoint, p256dh: body.keys.p256dh, auth: body.keys.auth },
+      update: { p256dh: body.keys.p256dh, auth: body.keys.auth, enabled: true },
+    }));
+  });
+
+  it('rejects non-HTTPS push endpoints', async () => {
+    process.env.VAPID_PUBLIC_KEY = 'public-test-key';
+    process.env.VAPID_PRIVATE_KEY = 'private-test-key';
+    process.env.VAPID_SUBJECT = 'mailto:test@example.invalid';
+
+    await expect(service.subscribe(token, {
+      endpoint: 'http://push.example.invalid/subscription',
+      keys: { p256dh: 'a'.repeat(30), auth: 'b'.repeat(12) },
+    })).rejects.toBeInstanceOf(BadRequestException);
+    expect(pushUpsert).not.toHaveBeenCalled();
+  });
+
+  it('disables one order endpoint without deleting the browser subscription', async () => {
+    await expect(service.unsubscribe(token, 'https://push.example.invalid/subscription')).resolves.toEqual({ ok: true });
+    expect(pushUpdateMany).toHaveBeenCalledWith({
+      where: { orderId: order.id, endpoint: 'https://push.example.invalid/subscription' }, data: { enabled: false },
+    });
   });
 });

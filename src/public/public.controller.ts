@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Post, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { resolve } from 'node:path';
 import { AppRole } from '@prisma/client';
@@ -15,7 +15,9 @@ export class PublicController {
   track(@Param('token') token: string) { return this.tracking.track(token); }
 
   @Get(':token/notifications')
-  notificationConfig(@Param('token') token: string) { return this.tracking.notificationConfig(token); }
+  notificationConfig(@Param('token') token: string, @Headers('x-push-endpoint') endpoint?: string) {
+    return this.tracking.notificationConfig(token, endpoint);
+  }
 
   @Post(':token/notifications')
   subscribe(@Param('token') token: string, @Body() body: Record<string, unknown>) { return this.tracking.subscribe(token, body); }

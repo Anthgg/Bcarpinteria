@@ -31,6 +31,16 @@ export class ProductionController {
   @Get() list() { return this.production.listJobs(); }
   @Get(':id') get(@Param('id') id: string) { return this.production.getJob(id); }
 
+  @Get('notifications/test-targets')
+  @Roles(AppRole.ADMIN, AppRole.TESTER)
+  pushTestTargets() { return this.production.pushTestTargets(); }
+
+  @Post('notifications/test')
+  @Roles(AppRole.ADMIN, AppRole.TESTER)
+  sendPushTest(@CurrentUser() actor: AuthUser, @Body() body: BodyObject) {
+    return this.production.sendPushTest(actor, String(body.subscriptionId ?? ''));
+  }
+
   @Put(':id/materials')
   configure(@CurrentUser() actor: AuthUser, @Param('id') id: string, @Body() body: BodyObject) { return this.production.configure(actor, id, body); }
 
@@ -90,5 +100,10 @@ export class ProductionController {
     @Body() body: BodyObject,
   ) {
     return this.production.addPhoto(actor, id, file, body.caption ? String(body.caption) : undefined, body.public === true || body.public === 'true');
+  }
+
+  @Patch('photos/:photoId/visibility')
+  setPhotoVisibility(@CurrentUser() actor: AuthUser, @Param('photoId') photoId: string, @Body() body: BodyObject) {
+    return this.production.setPhotoVisibility(actor, photoId, body.public);
   }
 }

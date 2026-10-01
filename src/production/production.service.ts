@@ -2,7 +2,9 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   NoteVisibility,
@@ -31,6 +33,16 @@ const PROGRESS: Record<ProductionStage, number> = {
   READY: 100,
 };
 const STAGES = Object.values(ProductionStage);
+const PUBLIC_STAGE_LABELS: Record<ProductionStage, string> = {
+  ORDER_RECEIVED: 'Pedido recibido', MATERIALS_RESERVED: 'Materiales preparados', CUTTING: 'Corte',
+  ASSEMBLY: 'Ensamblaje', SANDING: 'Lijado', FINISHING: 'Acabado', QUALITY_CONTROL: 'Control de calidad', READY: 'Listo',
+};
+type PushEvent =
+  | { type: 'stage'; productName: string; stage: ProductionStage }
+  | { type: 'ready' }
+  | { type: 'public-update' }
+  | { type: 'public-photo' }
+  | { type: 'test' };
 const text = (value: unknown, label: string, max = 500) => {
   const result = String(value ?? '').trim();
   if (result.length < 1 || result.length > max) throw new BadRequestException(`${label} debe tener entre 1 y ${max} caracteres.`);
@@ -39,6 +51,8 @@ const text = (value: unknown, label: string, max = 500) => {
 
 @Injectable()
 export class ProductionService {
+  private readonly logger = new Logger(ProductionService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly core: CoreService,
@@ -325,7 +339,7 @@ export class ProductionService {
     if (!STAGES.includes(stage)) throw new BadRequestException('Etapa de producción inválida.');
     const note = noteValue == null ? null : text(noteValue, 'Nota', 500);
     const result = await this.prisma.$transaction(async (tx) => {
-      const job = await tx.productionJob.findUnique({ where: { id: jobId } });
+      const job = await tx.productionJob.findUnique({ where: { id: jobId }, include: { orderLine: true } });
       if (!job) throw new NotFoundException('Producción no encontrada.');
       if (job.status === ProductionStatus.COMPLETED || job.status === ProductionStatus.PAUSED) throw new ConflictException('Reanuda una producción activa antes de avanzar.');
       if (STAGES.indexOf(stage) !== STAGES.indexOf(job.stage) + 1) throw new ConflictException('Avanza una etapa a la vez para conservar el historial de producción.');
@@ -335,14 +349,17 @@ export class ProductionService {
         ...(stage === ProductionStage.READY ? { status: ProductionStatus.COMPLETED, completedAt: new Date() } : {}),
       } });
       await tx.productionStageHistory.create({ data: { jobId, stage, progress, userId: actor.id, note } });
-      if (stage === ProductionStage.READY) {
-        const remaining = await tx.productionJob.count({ where: { orderId: job.orderId, id: { not: jobId }, status: { not: ProductionStatus.COMPLETED } } });
-        if (remaining === 0) await tx.order.update({ where: { id: job.orderId }, data: { status: OrderStatus.READY } });
-      }
+      const orderReady = stage === ProductionStage.READY
+        && await tx.productionJob.count({ where: { orderId: job.orderId, id: { not: jobId }, status: { not: ProductionStatus.COMPLETED } } }) === 0;
+      if (orderReady) await tx.order.update({ where: { id: job.orderId }, data: { status: OrderStatus.READY } });
       await tx.auditLog.create({ data: { userId: actor.id, action: 'PRODUCTION_STAGE_CHANGED', entity: 'ProductionJob', entityId: jobId, metadata: { from: job.stage, to: stage, progress } } });
-      return { orderId: job.orderId, stage, progress };
+      return { orderId: job.orderId, stage, progress, productName: job.orderLine?.name ?? 'Tu proyecto', orderReady };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    await this.notify(result.orderId, { type: 'stage', stage: result.stage, progress: result.progress });
+    if (result.stage === ProductionStage.READY) {
+      if (result.orderReady) await this.notify(result.orderId, { type: 'ready' });
+    } else {
+      await this.notify(result.orderId, { type: 'stage', stage: result.stage, productName: result.productName });
+    }
     return this.getJob(jobId);
   }
 
@@ -365,7 +382,7 @@ export class ProductionService {
       jobId, visibility, content: text(input.content, 'Nota', 2000), userId: actor.id,
     } });
     await this.core.audit(actor.id, 'PRODUCTION_NOTE_ADDED', 'ProductionNote', note.id, { jobId, visibility });
-    if (visibility === NoteVisibility.PUBLIC) await this.notify(job.orderId, { type: 'public-update', message: note.content });
+    if (visibility === NoteVisibility.PUBLIC) await this.notify(job.orderId, { type: 'public-update' });
     return note;
   }
 
@@ -417,8 +434,57 @@ export class ProductionService {
       throw error;
     }
     await this.core.audit(actor.id, 'PRODUCTION_PHOTO_ADDED', 'ProductionPhoto', photo.id, { jobId, public: isPublic });
-    if (isPublic) await this.notify(job.orderId, { type: 'public-photo', caption: photo.caption });
+    if (isPublic) await this.notify(job.orderId, { type: 'public-photo' });
     return photo;
+  }
+
+  async setPhotoVisibility(actor: AuthUser, photoId: string, isPublic: unknown) {
+    if (typeof isPublic !== 'boolean') throw new BadRequestException('La visibilidad debe ser pública o interna.');
+    const photo = await this.prisma.productionPhoto.findUnique({
+      where: { id: photoId }, include: { job: { select: { orderId: true } } },
+    });
+    if (!photo) throw new NotFoundException('Fotografía no encontrada.');
+    const updated = await this.prisma.productionPhoto.update({ where: { id: photoId }, data: { public: isPublic } });
+    await this.core.audit(actor.id, 'PRODUCTION_PHOTO_VISIBILITY_CHANGED', 'ProductionPhoto', photoId, {
+      jobId: photo.jobId, fromPublic: photo.public, public: isPublic,
+    });
+    if (!photo.public && isPublic) await this.notify(photo.job.orderId, { type: 'public-photo' });
+    return { id: updated.id, public: updated.public };
+  }
+
+  async pushTestTargets() {
+    const configured = Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
+    const qaOrderCodes = this.qaPushOrderCodes();
+    if (!configured || !qaOrderCodes.length) return { configured, targets: [] };
+    const subscriptions = await this.prisma.pushSubscription.findMany({
+      where: { enabled: true, order: { code: { in: qaOrderCodes } } },
+      orderBy: { createdAt: 'desc' }, take: 30,
+      select: { id: true, createdAt: true, order: { select: { code: true, lines: { select: { name: true } } } } },
+    });
+    return {
+      configured,
+      targets: subscriptions.map((subscription) => ({
+        id: subscription.id, orderCode: subscription.order.code,
+        products: subscription.order.lines.map((line) => line.name), createdAt: subscription.createdAt,
+      })),
+    };
+  }
+
+  async sendPushTest(actor: AuthUser, subscriptionId: string) {
+    if (!this.isPushConfigured()) throw new ServiceUnavailableException('Web Push no está configurado.');
+    const qaOrderCodes = this.qaPushOrderCodes();
+    if (!qaOrderCodes.length) throw new ServiceUnavailableException('No hay pedidos QA habilitados para la prueba.');
+    const subscription = await this.prisma.pushSubscription.findFirst({
+      where: { id: subscriptionId, enabled: true, order: { code: { in: qaOrderCodes } } },
+      include: { order: { select: { id: true, code: true, trackingToken: true } } },
+    });
+    if (!subscription) throw new NotFoundException('Suscripción QA activa no encontrada.');
+    const delivered = await this.deliverPush(subscription, subscription.order, { type: 'test' });
+    if (!delivered) throw new ServiceUnavailableException('El aviso de prueba no se pudo entregar.');
+    await this.core.audit(actor.id, 'WEB_PUSH_TEST_SENT', 'PushSubscription', subscription.id, {
+      order: subscription.order.code, result: 'delivered',
+    });
+    return { sent: true, orderCode: subscription.order.code };
   }
 
   async getPhotoFile(id: string) {
@@ -435,24 +501,67 @@ export class ProductionService {
     return photo.url.split('/').at(-1)!;
   }
 
-  private async notify(orderId: string, payload: Record<string, unknown>) {
-    const publicKey = process.env.VAPID_PUBLIC_KEY;
-    const privateKey = process.env.VAPID_PRIVATE_KEY;
-    const subject = process.env.VAPID_SUBJECT ?? 'mailto:local@carpinteria.invalid';
-    if (!publicKey || !privateKey) return;
+  private isPushConfigured() {
+    return Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
+  }
+
+  private qaPushOrderCodes() {
+    return (process.env.PUSH_TEST_ORDER_CODES ?? '').split(',').map((code) => code.trim()).filter(Boolean);
+  }
+
+  private notificationFor(event: PushEvent, orderCode: string, url: string) {
+    const copy = event.type === 'stage'
+      ? { title: 'Tu pedido avanzó', body: `${event.productName} ahora está en ${PUBLIC_STAGE_LABELS[event.stage]} · ${PROGRESS[event.stage]}%.` }
+      : event.type === 'ready'
+        ? { title: 'Tu pedido está listo', body: `${orderCode} está listo para coordinar la entrega.` }
+        : event.type === 'public-update'
+          ? { title: 'Nueva actualización del taller', body: 'El taller publicó un nuevo avance para tu pedido.' }
+          : event.type === 'public-photo'
+            ? { title: 'Nueva foto del avance', body: 'Hay una nueva foto pública del avance de tu pedido.' }
+            : { title: 'Aviso de prueba', body: 'Las notificaciones del taller están conectadas.' };
+    return { ...copy, icon: '/brand/carpinteria-360-logo.png', badge: '/brand/carpinteria-360-logo.png', data: { url } };
+  }
+
+  private async deliverPush(
+    subscription: { id: string; endpoint: string; p256dh: string; auth: string },
+    order: { id: string; code: string; trackingToken: string },
+    event: PushEvent,
+  ) {
+    if (!this.isPushConfigured()) return false;
     const webpush = await import('web-push');
-    webpush.default.setVapidDetails(subject, publicKey, privateKey);
-    const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { trackingToken: true } });
+    webpush.default.setVapidDetails(process.env.VAPID_SUBJECT!, process.env.VAPID_PUBLIC_KEY!, process.env.VAPID_PRIVATE_KEY!);
     const baseUrl = process.env.PUBLIC_BASE_URL ?? 'http://127.0.0.1:8080';
-    const notification = { ...payload, url: order ? new URL(`/seguimiento/${order.trackingToken}`, baseUrl).toString() : baseUrl };
-    const subscriptions = await this.prisma.pushSubscription.findMany({ where: { orderId, enabled: true } });
-    await Promise.all(subscriptions.map(async (subscription) => {
-      try {
-        await webpush.default.sendNotification({ endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } }, JSON.stringify(notification));
-      } catch (error) {
-        const statusCode = (error as { statusCode?: number }).statusCode;
-        if (statusCode === 404 || statusCode === 410) await this.prisma.pushSubscription.update({ where: { id: subscription.id }, data: { enabled: false } });
+    const destination = new URL(`/seguimiento/${order.trackingToken}`, baseUrl).toString();
+    try {
+      await webpush.default.sendNotification(
+        { endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } },
+        JSON.stringify(this.notificationFor(event, order.code, destination)),
+      );
+      return true;
+    } catch (error) {
+      const statusCode = (error as { statusCode?: number }).statusCode;
+      if (statusCode === 404 || statusCode === 410) {
+        await this.prisma.pushSubscription.updateMany({ where: { id: subscription.id, enabled: true }, data: { enabled: false } });
+        this.logger.warn(`Web Push order ${order.code}, event ${event.type}: expired subscription disabled.`);
+      } else {
+        this.logger.warn(`Web Push order ${order.code}, event ${event.type}: delivery failed.`);
       }
-    }));
+      return false;
+    }
+  }
+
+  private async notify(orderId: string, event: PushEvent) {
+    if (!this.isPushConfigured()) return;
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId }, select: { id: true, code: true, trackingToken: true },
+      });
+      if (!order) return;
+      const subscriptions = await this.prisma.pushSubscription.findMany({ where: { orderId, enabled: true } });
+      const results = await Promise.all(subscriptions.map((subscription) => this.deliverPush(subscription, order, event)));
+      this.logger.log(`Web Push order ${order.code}, event ${event.type}: delivered ${results.filter(Boolean).length}/${subscriptions.length}.`);
+    } catch {
+      this.logger.warn(`Web Push order ${orderId}, event ${event.type}: dispatch failed.`);
+    }
   }
 }
