@@ -148,7 +148,7 @@ export class DocumentsService {
     document.roundedRect(panelX, panelY, panelWidth, panelHeight, 8).fill('#F6F3EC');
     const totalRows = [
       ['Subtotal', format(order.subtotalCents)],
-      ['Descuento', `− ${format(order.discountCents)}`],
+      ['Descuento', `- ${format(order.discountCents)}`],
       ['Base imponible', format(order.subtotalCents - order.discountCents)],
       [`IGV (${(order.taxRateBasisPoints / 100).toFixed(2)}%)`, format(order.taxCents)],
     ];
