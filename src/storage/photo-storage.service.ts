@@ -26,7 +26,11 @@ export interface ObjectStore {
   upload(path: string, body: Buffer, contentType: string): Promise<void>;
   download(path: string): Promise<Buffer>;
   remove(path: string): Promise<void>;
+  // Solo metadata del bucket (sin subir ni borrar). Opcional para dobles de prueba.
+  inspect?(): Promise<{ exists: boolean; public: boolean }>;
 }
+
+export type StorageStatus = { driver: StorageDriver; status: 'configurado' | 'conectado' | 'bucket no encontrado' | 'bucket público' | 'no disponible' };
 
 export type PhotoStorageOptions = { driver?: StorageDriver; objects?: ObjectStore; uploadDir?: string };
 
@@ -68,6 +72,12 @@ export class SupabaseObjectStore implements ObjectStore {
     const { error } = await this.storage.from(this.bucket).remove([path]);
     if (error) throw new ServiceUnavailableException('No se pudo retirar la fotografía del almacenamiento.');
   }
+
+  async inspect() {
+    const { data, error } = await this.storage.getBucket(this.bucket);
+    if (error && !isStatus(error, 404) && !isStatus(error, 400)) throw new ServiceUnavailableException('Storage no disponible.');
+    return { exists: Boolean(data), public: Boolean(data?.public) };
+  }
 }
 
 export function storageDriverFromEnv(value = process.env.STORAGE_DRIVER): StorageDriver {
@@ -82,12 +92,28 @@ export class PhotoStorageService {
   readonly driver: StorageDriver;
   private readonly objects?: ObjectStore;
   private readonly uploadDir?: string;
+  private statusCache?: { value: StorageStatus; expires: number };
 
   constructor(@Optional() @Inject(PHOTO_STORAGE_OPTIONS) options?: PhotoStorageOptions) {
     this.driver = options?.driver ?? storageDriverFromEnv();
     this.uploadDir = options?.uploadDir;
     if (this.driver === 'supabase') this.objects = options?.objects ?? SupabaseObjectStore.fromEnv();
     if (!options) this.logger.log(`Fotografías: almacenamiento ${this.driver === 'supabase' ? 'Supabase Storage (bucket privado)' : 'local (UPLOAD_DIR)'}.`);
+  }
+
+  // Estado para /api/health: lectura de metadata del bucket, cacheada 60 s (el healthcheck corre cada 10 s).
+  async status(now = Date.now()): Promise<StorageStatus> {
+    if (this.driver === 'local' || !this.objects?.inspect) return { driver: this.driver, status: 'configurado' };
+    if (this.statusCache && this.statusCache.expires > now) return this.statusCache.value;
+    let status: StorageStatus['status'];
+    try {
+      const bucket = await this.objects.inspect();
+      status = !bucket.exists ? 'bucket no encontrado' : bucket.public ? 'bucket público' : 'conectado';
+    } catch {
+      status = 'no disponible';
+    }
+    this.statusCache = { value: { driver: this.driver, status }, expires: now + 60_000 };
+    return this.statusCache.value;
   }
 
   localDirectory() {

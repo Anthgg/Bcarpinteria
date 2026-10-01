@@ -1,16 +1,20 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import * as fs from 'fs';
 import { resolve } from 'path';
 import { PrismaService } from '../prisma.service';
+import { PhotoStorageService } from '../storage/photo-storage.service';
+import type { StorageStatus } from '../storage/photo-storage.service';
 
 export interface HealthReport {
   status: string;
   service: string;
   environment: string;
   database: {
+    provider: string;
     connected: boolean;
     message: string;
   };
+  storage: StorageStatus;
   excel: {
     file: string;
     path: string;
@@ -20,9 +24,14 @@ export interface HealthReport {
   timestamp: string;
 }
 
+// Solo lecturas: SELECT 1 y metadata del bucket. Nunca escribe (ni SystemProbe) y nunca devuelve
+// host, usuario, cadena de conexión, project ref ni claves; los errores se resumen sin el detalle del driver.
 @Injectable()
 export class HealthService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly storage?: PhotoStorageService,
+  ) {}
 
   get bdPath(): string {
     return resolve(process.env.BD_PATH ?? './bd/inventario g.xlsx');
@@ -32,15 +41,16 @@ export class HealthService {
     return process.env.APP_ENV ?? 'LOCAL';
   }
 
-  async checkDatabase(): Promise<{ connected: boolean; message: string }> {
+  get databaseProvider(): string {
+    return this.environment === 'SUPABASE' ? 'PostgreSQL (Supabase)' : 'PostgreSQL (Docker local)';
+  }
+
+  async checkDatabase(): Promise<HealthReport['database']> {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
-      return { connected: true, message: 'PostgreSQL conectado' };
-    } catch (error) {
-      return {
-        connected: false,
-        message: `PostgreSQL no disponible: ${(error as Error).message}`,
-      };
+      return { provider: this.databaseProvider, connected: true, message: 'PostgreSQL conectado' };
+    } catch {
+      return { provider: this.databaseProvider, connected: false, message: 'PostgreSQL no disponible' };
     }
   }
 
@@ -52,6 +62,7 @@ export class HealthService {
       service: 'carpinteria-backend',
       environment: this.environment,
       database: await this.checkDatabase(),
+      storage: this.storage ? await this.storage.status() : { driver: 'local', status: 'configurado' },
       excel: {
         file: 'inventario g.xlsx',
         path,

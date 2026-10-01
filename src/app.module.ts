@@ -16,11 +16,12 @@ import { ProductionService } from './production/production.service';
 import { DocumentsController, FilesController } from './public/public.controller';
 import { PublicController } from './public/public.controller';
 import { PublicService } from './public/public.service';
-import { PhotoStorageService } from './storage/photo-storage.service';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
     PrismaModule,
+    StorageModule,
     HealthModule,
   ],
   controllers: [
@@ -44,7 +45,6 @@ import { PhotoStorageService } from './storage/photo-storage.service';
     PublicService,
     DocumentsService,
     DashboardService,
-    PhotoStorageService,
     CsrfGuard,
     AccessGuard,
     RolesGuard,
