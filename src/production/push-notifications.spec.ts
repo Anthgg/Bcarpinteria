@@ -50,6 +50,7 @@ describe('client-visible Web Push events', () => {
     const tx = {
       productionJob: { findUnique: jest.fn().mockResolvedValue(job), update: jest.fn().mockResolvedValue({}) },
       productionStageHistory: { create: jest.fn().mockResolvedValue({}) },
+      order: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
     const prisma = { $transaction: jest.fn((run: (transaction: typeof tx) => unknown) => run(tx)) };
@@ -59,6 +60,7 @@ describe('client-visible Web Push events', () => {
 
     await service.advanceStage(actor, job.id, ProductionStage.MATERIALS_RESERVED);
 
+    expect(tx.order.updateMany).toHaveBeenCalledWith({ where: { id: job.orderId, status: 'CONFIRMED' }, data: { status: 'IN_PRODUCTION' } });
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith(job.orderId, {
       type: 'stage', productName: 'Mesa A013', stage: ProductionStage.MATERIALS_RESERVED,
@@ -73,7 +75,7 @@ describe('client-visible Web Push events', () => {
         count: jest.fn().mockResolvedValue(0),
       },
       productionStageHistory: { create: jest.fn().mockResolvedValue({}) },
-      order: { update: jest.fn().mockResolvedValue({}) },
+      order: { update: jest.fn().mockResolvedValue({}), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
     const prisma = { $transaction: jest.fn((run: (transaction: typeof tx) => unknown) => run(tx)) };
@@ -89,7 +91,7 @@ describe('client-visible Web Push events', () => {
     expect(notify).toHaveBeenCalledWith(job.orderId, { type: 'ready' });
   });
 
-  it('does not send a global ready event while another product remains unfinished', async () => {
+  it('announces a finished product, not the whole order, while another product remains unfinished', async () => {
     const readyJob = { ...job, stage: ProductionStage.QUALITY_CONTROL, progress: 90 };
     const tx = {
       productionJob: {
@@ -97,7 +99,7 @@ describe('client-visible Web Push events', () => {
         count: jest.fn().mockResolvedValue(1),
       },
       productionStageHistory: { create: jest.fn().mockResolvedValue({}) },
-      order: { update: jest.fn().mockResolvedValue({}) },
+      order: { update: jest.fn().mockResolvedValue({}), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
     const service = new ProductionService({ $transaction: (run: (transaction: typeof tx) => unknown) => run(tx) } as never, {} as never);
@@ -107,7 +109,18 @@ describe('client-visible Web Push events', () => {
     await service.advanceStage(actor, job.id, ProductionStage.READY);
 
     expect(tx.order.update).not.toHaveBeenCalled();
-    expect(notify).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(job.orderId, { type: 'stage', stage: ProductionStage.READY, productName: 'Mesa A013' });
+    expect(notify).not.toHaveBeenCalledWith(job.orderId, { type: 'ready' });
+  });
+
+  it('words a finished product without claiming the whole order is ready', () => {
+    const service = new ProductionService({} as never, {} as never);
+    const copy = (service as unknown as { notificationFor: (...args: unknown[]) => { title: string; body: string } })
+      .notificationFor({ type: 'stage', stage: ProductionStage.READY, productName: 'Armario' }, 'PED-00010', 'https://x/seguimiento/t');
+    expect(copy.title).toBe('Un producto de tu pedido está listo');
+    expect(copy.body).toBe('Armario está listo. Seguimos con el resto de tu pedido.');
+    expect(copy.body).not.toContain('PED-00010');
   });
 
   it('notifies only for public notes and never includes note text in the push event', async () => {

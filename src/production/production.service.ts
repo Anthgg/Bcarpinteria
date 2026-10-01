@@ -352,17 +352,17 @@ export class ProductionService {
         ...(stage === ProductionStage.READY ? { status: ProductionStatus.COMPLETED, completedAt: new Date() } : {}),
       } });
       await tx.productionStageHistory.create({ data: { jobId, stage, progress, userId: actor.id, note } });
+      // Una línea que sale de "Pedido recibido" deja el pedido En producción aunque no se hayan reservado materiales.
+      await tx.order.updateMany({ where: { id: job.orderId, status: OrderStatus.CONFIRMED }, data: { status: OrderStatus.IN_PRODUCTION } });
       const orderReady = stage === ProductionStage.READY
         && await tx.productionJob.count({ where: { orderId: job.orderId, id: { not: jobId }, status: { not: ProductionStatus.COMPLETED } } }) === 0;
       if (orderReady) await tx.order.update({ where: { id: job.orderId }, data: { status: OrderStatus.READY } });
       await tx.auditLog.create({ data: { userId: actor.id, action: 'PRODUCTION_STAGE_CHANGED', entity: 'ProductionJob', entityId: jobId, metadata: { from: job.stage, to: stage, progress } } });
       return { orderId: job.orderId, stage, progress, productName: job.orderLine?.name ?? 'Tu proyecto', orderReady };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    if (result.stage === ProductionStage.READY) {
-      if (result.orderReady) await this.notify(result.orderId, { type: 'ready' });
-    } else {
-      await this.notify(result.orderId, { type: 'stage', stage: result.stage, productName: result.productName });
-    }
+    // Pedido completo: un único aviso global. Línea lista con otras pendientes: aviso del producto, sin decir que el pedido está listo.
+    if (result.orderReady) await this.notify(result.orderId, { type: 'ready' });
+    else await this.notify(result.orderId, { type: 'stage', stage: result.stage, productName: result.productName });
     return this.getJob(jobId);
   }
 
@@ -524,7 +524,9 @@ export class ProductionService {
   }
 
   private notificationFor(event: PushEvent, orderCode: string, url: string) {
-    const copy = event.type === 'stage'
+    const copy = event.type === 'stage' && event.stage === ProductionStage.READY
+      ? { title: 'Un producto de tu pedido está listo', body: `${event.productName} está listo. Seguimos con el resto de tu pedido.` }
+      : event.type === 'stage'
       ? { title: 'Tu pedido avanzó', body: `${event.productName} ahora está en ${PUBLIC_STAGE_LABELS[event.stage]} · ${PROGRESS[event.stage]}%.` }
       : event.type === 'ready'
         ? { title: 'Tu pedido está listo', body: `${orderCode} está listo para coordinar la entrega.` }
