@@ -158,6 +158,15 @@ En A015.3 `ProductionPhoto` se copió solo como metadata; los archivos se migrar
 
 **Prueba real del bucket:** `SUPABASE_STORAGE_IT=1 npx jest src/storage/supabase-object-store.int.spec.ts` (con las variables de Supabase cargadas) sube, lee y borra un objeto bajo `qa/`. Sin esa variable, la suite la omite.
 
+### Runtime SUPABASE QA (A017)
+
+La misma app local puede ejecutarse contra Supabase (base de datos y Storage) con `npm run stack:supabase` desde `Carpinteria`, y volver con `npm run stack:local`, sin editar `.env`. La guía completa está en `Carpinteria/docs/SUPABASE_RUNTIME.md`.
+
+- `npm run start:dev:remote` es el servidor de desarrollo **sin** `prisma migrate deploy`. Lo usa el modo Supabase, cuyo `DATABASE_URL` es el Transaction Pooler 6543, donde Prisma Migrate no debe correr.
+- `npm run db:supabase:status` y `SUPABASE_MIGRATE_CONFIRM=YES npm run db:supabase:deploy` (`scripts/supabase-migrate.cjs`) migran siempre por `DIRECT_URL` (5432, `sslmode=require`) y rechazan el pooler 6543.
+- Con `APP_ENV=SUPABASE`, la API no arranca si `DATABASE_URL` no usa el puerto 6543 con `pgbouncer=true`, `sslmode=require` y `connection_limit` (`assertRuntimeDatabase`).
+- `GET /api/health` informa `environment`, `database.provider` y `storage` (driver y estado, con lectura de metadata del bucket cacheada 60 s). Es de solo lectura y no muestra host, credenciales ni project ref.
+
 ## Comprobaciones
 
 Desde `Bcarpinteria`:
